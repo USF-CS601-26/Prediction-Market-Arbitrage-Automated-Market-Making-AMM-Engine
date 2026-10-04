@@ -1,0 +1,232 @@
+[
+  {
+    "type": "snapshot",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.854777+00:00",
+    "sequence": 1,
+    "bids": [
+      {
+        "price": "0.54",
+        "size": "100"
+      },
+      {
+        "price": "0.53",
+        "size": "200"
+      },
+      {
+        "price": "0.52",
+        "size": "300"
+      },
+      {
+        "price": "0.51",
+        "size": "400"
+      },
+      {
+        "price": "0.50",
+        "size": "500"
+      }
+    ],
+    "asks": [
+      {
+        "price": "0.56",
+        "size": "100"
+      },
+      {
+        "price": "0.57",
+        "size": "200"
+      },
+      {
+        "price": "0.58",
+        "size": "300"
+      },
+      {
+        "price": "0.59",
+        "size": "400"
+      },
+      {
+        "price": "0.60",
+        "size": "500"
+      }
+    ]
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.854968+00:00",
+    "sequence": 2,
+    "side": "ask",
+    "price": "0.6",
+    "size": "50"
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.854976+00:00",
+    "sequence": 3,
+    "side": "ask",
+    "price": "0.57",
+    "size": "150"
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.854980+00:00",
+    "sequence": 4,
+    "side": "ask",
+    "price": "0.6",
+    "size": "50"
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.854983+00:00",
+    "sequence": 5,
+    "side": "ask",
+    "price": "0.58",
+    "size": "50"
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.854987+00:00",
+    "sequence": 6,
+    "side": "bid",
+    "price": "0.5",
+    "size": "50"
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.854989+00:00",
+    "sequence": 7,
+    "side": "ask",
+    "price": "0.59",
+    "size": "0"
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.854992+00:00",
+    "sequence": 8,
+    "side": "bid",
+    "price": "0.53",
+    "size": "100"
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.854994+00:00",
+    "sequence": 9,
+    "side": "ask",
+    "price": "0.58",
+    "size": "0"
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.854996+00:00",
+    "sequence": 10,
+    "side": "ask",
+    "price": "0.56",
+    "size": "100"
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.854999+00:00",
+    "sequence": 11,
+    "side": "bid",
+    "price": "0.51",
+    "size": "100"
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.855001+00:00",
+    "sequence": 12,
+    "side": "bid",
+    "price": "0.53",
+    "size": "150"
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.855003+00:00",
+    "sequence": 13,
+    "side": "ask",
+    "price": "0.59",
+    "size": "150"
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.855005+00:00",
+    "sequence": 14,
+    "side": "bid",
+    "price": "0.51",
+    "size": "50"
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.855007+00:00",
+    "sequence": 15,
+    "side": "ask",
+    "price": "0.57",
+    "size": "150"
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.855009+00:00",
+    "sequence": 16,
+    "side": "ask",
+    "price": "0.59",
+    "size": "0"
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.855011+00:00",
+    "sequence": 17,
+    "side": "bid",
+    "price": "0.53",
+    "size": "150"
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.855013+00:00",
+    "sequence": 18,
+    "side": "bid",
+    "price": "0.53",
+    "size": "50"
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.855016+00:00",
+    "sequence": 19,
+    "side": "bid",
+    "price": "0.52",
+    "size": "100"
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.855018+00:00",
+    "sequence": 20,
+    "side": "bid",
+    "price": "0.5",
+    "size": "150"
+  },
+  {
+    "type": "delta",
+    "market_id": "KXPRES-24",
+    "timestamp": "2026-10-04T05:31:08.855021+00:00",
+    "sequence": 21,
+    "side": "ask",
+    "price": "0.58",
+    "size": "100"
+  }
+]

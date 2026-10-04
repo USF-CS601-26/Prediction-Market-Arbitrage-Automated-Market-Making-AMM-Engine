@@ -1,0 +1,5 @@
+pydantic>=2.0
+websockets>=12.0
+sortedcontainers
+pytest
+pytest-asyncio
