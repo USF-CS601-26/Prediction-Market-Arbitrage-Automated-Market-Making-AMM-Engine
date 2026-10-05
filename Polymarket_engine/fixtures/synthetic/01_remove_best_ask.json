@@ -1,0 +1,22 @@
+{
+  "description": "Best ask 0.50 is removed (size 0) and a new best bid 0.45 appears. Asks arrive worst-first like the real feed.",
+  "frames": [
+    [
+      {"event_type": "book", "asset_id": "YES",
+       "bids": [{"price": "0.40", "size": "100"}, {"price": "0.42", "size": "28.4"}],
+       "asks": [{"price": "0.60", "size": "200"}, {"price": "0.50", "size": "5800"}]}
+    ],
+    {"event_type": "price_change", "price_changes": [
+      {"asset_id": "YES", "price": "0.50", "size": "0", "side": "SELL"},
+      {"asset_id": "YES", "price": "0.45", "size": "300", "side": "BUY"}
+    ]}
+  ],
+  "expected": {
+    "YES": {
+      "valid": true,
+      "bids": [["0.45", "300"], ["0.42", "28.4"], ["0.40", "100"]],
+      "asks": [["0.60", "200"]]
+    },
+    "NO": {"valid": false, "bids": [], "asks": []}
+  }
+}
