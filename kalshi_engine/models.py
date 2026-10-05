@@ -148,3 +148,26 @@ class ExecutionQuote(BaseModel):
     net: Decimal                 # cost to buy, or proceeds to sell, after fees
     avg_price: Decimal | None    # net / filled; None if nothing could fill
     fills: list[Fill] = []
+
+
+class CrossVenueEdge(BaseModel):
+    """
+    One direction of a cross-venue trade on a verified contract pair:
+    buy the same outcome on one venue, sell it on the other, at a given
+    size, after walking real depth and paying both venues' fees.
+
+    net_edge is the number that matters. It is what you would actually
+    keep, and it can be negative even when the raw quotes look
+    mispriced, because depth and fees both work against you.
+    """
+    pair_id: str
+    size: Decimal
+    buy_venue: str
+    sell_venue: str
+    buy: ExecutionQuote
+    sell: ExecutionQuote
+    gross_edge: Decimal        # sell gross - buy gross, before any fees
+    total_fees: Decimal
+    net_edge: Decimal          # sell net - buy net; the real number
+    net_per_contract: Decimal | None
+    executable: bool           # both legs fully filled at this size
