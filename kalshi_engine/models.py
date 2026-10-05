@@ -67,3 +67,40 @@ class OrderBookDelta(BaseModel):
                                      # raises ValueError — this is how dropped/missed
                                      # messages get detected instead of silently
                                      # corrupting the book's state
+
+class Candle(BaseModel):
+    """
+    One OHLC period for a single market, from Kalshi's candlesticks
+    endpoint. Used for backtesting and signal work — note this is
+    historical *trade* data, a fundamentally different thing from the
+    live resting orders in OrderBookSnapshot.
+
+    Two independent price series live here:
+
+      - open/high/low/close/mean describe prices that actually TRADED.
+        They are all None in a period with no trades, which is the common
+        case on a quiet market at 1-minute resolution, so every consumer
+        has to handle None rather than assume a price exists.
+      - yes_bid_* / yes_ask_* describe the QUOTE, which exists whether or
+        not anyone traded. On an illiquid market this is usually the more
+        informative series of the two.
+    """
+    market_id: str
+    exchange: str
+    end_ts: datetime                 # close of this candle's period
+    interval_minutes: int            # 1, 60 or 1440 — Kalshi accepts no others
+
+    open: Decimal | None = None      # traded-price OHLC; None when volume == 0
+    high: Decimal | None = None
+    low: Decimal | None = None
+    close: Decimal | None = None
+    mean: Decimal | None = None      # volume-weighted mean traded price
+    previous: Decimal | None = None  # last trade before this period, if any
+
+    yes_bid_open: Decimal | None = None   # quote OHLC — present even with no trades
+    yes_bid_close: Decimal | None = None
+    yes_ask_open: Decimal | None = None
+    yes_ask_close: Decimal | None = None
+
+    volume: Decimal = Decimal(0)          # contracts traded during the period
+    open_interest: Decimal = Decimal(0)   # contracts outstanding at period end
