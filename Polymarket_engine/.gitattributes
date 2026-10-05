@@ -1,0 +1,6 @@
+# The team works on Windows and macOS: store and check out text files with
+# LF line endings everywhere, so diffs don't fill up with line-ending changes.
+* text=auto eol=lf
+
+# Recorded tapes are test data: keep them byte-for-byte as recorded.
+*.jsonl -text
