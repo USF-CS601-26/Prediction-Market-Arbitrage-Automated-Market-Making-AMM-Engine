@@ -26,11 +26,14 @@ Handles Kalshi's bid-only yes/no book structure by translating:
 import asyncio
 import json
 import os
+import random
+import time as _time
 import websockets
 from datetime import datetime, timezone
 from decimal import Decimal
 from dotenv import load_dotenv
 
+from websockets.exceptions import InvalidStatus
 from kalshi_auth import generate_auth_headers
 from order_book import OrderBook
 from models import OrderBookSnapshot, OrderBookDelta, PriceLevel, Side
@@ -140,23 +143,127 @@ def _parse_delta(msg: dict) -> tuple[Side, Decimal, Decimal]:
     return Side.ASK, _to_ask_price(raw_price), change
 
 
+# Reconnect pacing. Backoff doubles per consecutive failure up to the cap;
+# a connection that stays up longer than STABLE_AFTER is treated as healthy
+# and resets the backoff, so a connect/drop flap can't hammer the exchange.
+BASE_BACKOFF = 1.0
+MAX_BACKOFF = 60.0
+STABLE_AFTER = 60.0
+
+# Heartbeat. The websockets library sends pings on its own; setting these
+# explicitly makes the liveness check visible and tunable, and bounds how
+# long a silently dead TCP connection can masquerade as healthy.
+PING_INTERVAL = 20
+PING_TIMEOUT = 20
+
+
 class KalshiWSClient:
-    def __init__(self, market_ticker: str, order_book: OrderBook):
+    def __init__(self, market_ticker: str, order_book: OrderBook,
+                 ping_interval: int = PING_INTERVAL,
+                 ping_timeout: int = PING_TIMEOUT,
+                 max_backoff: float = MAX_BACKOFF):
         self.market_ticker = market_ticker
         self.order_book = order_book
+        self.ping_interval = ping_interval
+        self.ping_timeout = ping_timeout
+        self.max_backoff = max_backoff
         self._ws = None
         self._message_id = 1
         self._sid = None
+        # connection/freshness state. `connected` is transport-level;
+        # `_seeded` means a snapshot has been applied since the last
+        # connect. Both must hold before the book means anything.
+        self.connected = False
+        self._seeded = False
+        self.reconnects = 0
         # set while we've detected a sequence gap and are waiting on a
         # fresh snapshot; deltas that arrive in the meantime are dropped
         # because they'd apply on top of known-stale state
         self._resyncing = False
 
+    @property
+    def book_is_fresh(self) -> bool:
+        """
+        Whether the order book currently reflects live exchange state.
+
+        False while disconnected, before the first snapshot of a
+        connection, and during a post-gap resync. Downstream spread and
+        arbitrage logic MUST check this: acting on a stale book is how a
+        detector reports opportunities that no longer exist.
+        """
+        return self.connected and self._seeded and not self._resyncing
+
+    async def run_forever(self, max_attempts: int | None = None):
+        """
+        Maintains a persistent subscription across connection drops.
+
+        Reconnects with exponential backoff plus jitter (jitter so that
+        several clients recovering from the same outage don't retry in
+        lockstep). Each reconnect re-subscribes from scratch and waits
+        for a fresh snapshot, because Kalshi restarts sequence numbering
+        per subscription — resuming mid-stream would silently corrupt
+        the book.
+
+        Authentication failures are fatal and raise immediately: a 401
+        means the credentials are wrong, and no amount of retrying will
+        fix that.
+        """
+        attempt = 0
+        while True:
+            started = _time.monotonic()
+            try:
+                await self.connect_and_listen()
+                reason = "closed by server"
+            except InvalidStatus as e:
+                if e.response.status_code in (401, 403):
+                    raise RuntimeError(
+                        f"Kalshi rejected the credentials (HTTP "
+                        f"{e.response.status_code}). Check KALSHI_ENV and the "
+                        f"matching key id/private key — demo and prod keys are "
+                        f"not interchangeable."
+                    ) from e
+                reason = f"handshake failed: HTTP {e.response.status_code}"
+            except (OSError, websockets.exceptions.WebSocketException) as e:
+                reason = f"{type(e).__name__}: {e}"
+            finally:
+                # the book is stale the instant the socket goes away
+                self.connected = False
+                self._seeded = False
+                self._ws = None
+
+            uptime = _time.monotonic() - started
+            if uptime >= STABLE_AFTER:
+                attempt = 0        # the connection was healthy; not a flap
+
+            attempt += 1
+            self.reconnects += 1
+            if max_attempts is not None and attempt > max_attempts:
+                raise RuntimeError(f"giving up after {max_attempts} attempts ({reason})")
+
+            delay = min(self.max_backoff, BASE_BACKOFF * 2 ** (attempt - 1))
+            delay += random.uniform(0, delay * 0.3)
+            print(f"Disconnected ({reason}) after {uptime:.0f}s — "
+                  f"reconnecting in {delay:.1f}s [attempt {attempt}]")
+            await asyncio.sleep(delay)
+
     async def connect_and_listen(self):
         auth_headers = generate_auth_headers("GET", WS_PATH)
 
-        async with websockets.connect(WS_URL, additional_headers=auth_headers) as ws:
+        async with websockets.connect(
+            WS_URL,
+            additional_headers=auth_headers,
+            ping_interval=self.ping_interval,
+            ping_timeout=self.ping_timeout,
+        ) as ws:
             self._ws = ws
+            self.connected = True
+            # per-connection state: sids and sequence numbers are scoped
+            # to a subscription, so nothing from the previous one carries over
+            self._seeded = False
+            self._resyncing = False
+            self._sid = None
+            self._message_id = 1
+            self.order_book.last_sequence = None
             print(f"Connected to {WS_URL}. "
                   f"Subscribing to orderbook for {self.market_ticker}")
             await self._subscribe()
@@ -208,6 +315,7 @@ class KalshiWSClient:
             snapshot = _kalshi_snapshot_to_model(msg, data)
             self.order_book.apply_snapshot(snapshot)
             self._resyncing = False
+            self._seeded = True
             self._print_top_of_book("snapshot")
 
         elif msg_type == "orderbook_delta":
@@ -271,7 +379,7 @@ if __name__ == "__main__":
             print("Starting connection attempt...", flush=True)
             book = OrderBook(market_id=MARKET_TICKER, exchange="kalshi")
             client = KalshiWSClient(market_ticker=MARKET_TICKER, order_book=book)
-            await client.connect_and_listen()
+            await client.run_forever()
         except Exception:
             import traceback
             traceback.print_exc()

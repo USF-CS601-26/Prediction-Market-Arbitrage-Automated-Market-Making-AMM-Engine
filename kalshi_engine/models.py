@@ -104,3 +104,47 @@ class Candle(BaseModel):
 
     volume: Decimal = Decimal(0)          # contracts traded during the period
     open_interest: Decimal = Decimal(0)   # contracts outstanding at period end
+
+
+class FeeSchedule(BaseModel):
+    """
+    One venue's fee parameters for one series/market group.
+
+    Kept venue-neutral so the executable spread engine can price Kalshi
+    and Polymarket fills through the same code path — each venue
+    supplies its own schedule and fee function.
+    """
+    venue: str
+    series: str
+    fee_type: str            # e.g. "quadratic", "quadratic_with_maker_fees"
+    multiplier: Decimal      # per-series scaling; 0 means the series is fee-free
+
+
+class Fill(BaseModel):
+    """One price level consumed while walking the book."""
+    price: Decimal
+    size: Decimal
+    fee: Decimal
+
+
+class ExecutionQuote(BaseModel):
+    """
+    What it would actually cost to trade `requested` contracts right now,
+    after walking real depth and applying real fees.
+
+    This is the unit the arbitrage detector compares across venues. Note
+    `filled` may be less than `requested`: a venue can simply not have
+    the depth, and treating a partial fill as complete is how a detector
+    reports size it could never actually get.
+    """
+    market_id: str
+    exchange: str
+    side: Side                   # BID = we are selling into bids, ASK = buying from asks
+    requested: Decimal
+    filled: Decimal
+    fully_filled: bool
+    gross: Decimal               # notional before fees
+    fees: Decimal
+    net: Decimal                 # cost to buy, or proceeds to sell, after fees
+    avg_price: Decimal | None    # net / filled; None if nothing could fill
+    fills: list[Fill] = []
