@@ -25,8 +25,16 @@ for exponent = 1, the only value seen so far, this is exactly the formula above.
 
 When a buy walks several price levels, each level is a separate fill: compute
 the fee for each level and add them up.
+
+Argument order is (shares, price, fees), the same as kalshi_fees.taker_fee
+(contracts, price, schedule), so the spread engine can treat both venues
+alike. fee_fn() wraps a market's settings into the two-argument
+fee(contracts, price) function that executable_spread.FeeFn expects.
+A swapped call such as taker_fee(price, shares, ...) raises ValueError for
+any order of 1 share or more, because the share count fails the price check.
 """
 
+from collections.abc import Callable
 from decimal import ROUND_HALF_UP, Decimal
 
 from polymarket.config import FeeSchedule
@@ -37,7 +45,7 @@ _ZERO = Decimal(0)
 _ONE = Decimal(1)
 
 
-def taker_fee(price: Decimal, shares: Decimal, fees: FeeSchedule) -> Decimal:
+def taker_fee(shares: Decimal, price: Decimal, fees: FeeSchedule) -> Decimal:
     """USDC fee charged to the taker for filling `shares` at `price`."""
     if not (_ZERO < price < _ONE):
         raise ValueError(f"price must be strictly between 0 and 1, got {price}")
@@ -47,3 +55,10 @@ def taker_fee(price: Decimal, shares: Decimal, fees: FeeSchedule) -> Decimal:
         return _ZERO
     raw = shares * fees.rate * (price * (_ONE - price)) ** fees.exponent
     return raw.quantize(FEE_QUANTUM, rounding=ROUND_HALF_UP)
+
+
+def fee_fn(fees: FeeSchedule) -> Callable[[Decimal, Decimal], Decimal]:
+    """This market's taker fee as fee(contracts, price), the spread engine's FeeFn."""
+    def fee(contracts: Decimal, price: Decimal) -> Decimal:
+        return taker_fee(contracts, price, fees)
+    return fee
