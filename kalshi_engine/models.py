@@ -67,3 +67,107 @@ class OrderBookDelta(BaseModel):
                                      # raises ValueError — this is how dropped/missed
                                      # messages get detected instead of silently
                                      # corrupting the book's state
+
+class Candle(BaseModel):
+    """
+    One OHLC period for a single market, from Kalshi's candlesticks
+    endpoint. Used for backtesting and signal work — note this is
+    historical *trade* data, a fundamentally different thing from the
+    live resting orders in OrderBookSnapshot.
+
+    Two independent price series live here:
+
+      - open/high/low/close/mean describe prices that actually TRADED.
+        They are all None in a period with no trades, which is the common
+        case on a quiet market at 1-minute resolution, so every consumer
+        has to handle None rather than assume a price exists.
+      - yes_bid_* / yes_ask_* describe the QUOTE, which exists whether or
+        not anyone traded. On an illiquid market this is usually the more
+        informative series of the two.
+    """
+    market_id: str
+    exchange: str
+    end_ts: datetime                 # close of this candle's period
+    interval_minutes: int            # 1, 60 or 1440 — Kalshi accepts no others
+
+    open: Decimal | None = None      # traded-price OHLC; None when volume == 0
+    high: Decimal | None = None
+    low: Decimal | None = None
+    close: Decimal | None = None
+    mean: Decimal | None = None      # volume-weighted mean traded price
+    previous: Decimal | None = None  # last trade before this period, if any
+
+    yes_bid_open: Decimal | None = None   # quote OHLC — present even with no trades
+    yes_bid_close: Decimal | None = None
+    yes_ask_open: Decimal | None = None
+    yes_ask_close: Decimal | None = None
+
+    volume: Decimal = Decimal(0)          # contracts traded during the period
+    open_interest: Decimal = Decimal(0)   # contracts outstanding at period end
+
+
+class FeeSchedule(BaseModel):
+    """
+    One venue's fee parameters for one series/market group.
+
+    Kept venue-neutral so the executable spread engine can price Kalshi
+    and Polymarket fills through the same code path — each venue
+    supplies its own schedule and fee function.
+    """
+    venue: str
+    series: str
+    fee_type: str            # e.g. "quadratic", "quadratic_with_maker_fees"
+    multiplier: Decimal      # per-series scaling; 0 means the series is fee-free
+
+
+class Fill(BaseModel):
+    """One price level consumed while walking the book."""
+    price: Decimal
+    size: Decimal
+    fee: Decimal
+
+
+class ExecutionQuote(BaseModel):
+    """
+    What it would actually cost to trade `requested` contracts right now,
+    after walking real depth and applying real fees.
+
+    This is the unit the arbitrage detector compares across venues. Note
+    `filled` may be less than `requested`: a venue can simply not have
+    the depth, and treating a partial fill as complete is how a detector
+    reports size it could never actually get.
+    """
+    market_id: str
+    exchange: str
+    side: Side                   # BID = we are selling into bids, ASK = buying from asks
+    requested: Decimal
+    filled: Decimal
+    fully_filled: bool
+    gross: Decimal               # notional before fees
+    fees: Decimal
+    net: Decimal                 # cost to buy, or proceeds to sell, after fees
+    avg_price: Decimal | None    # net / filled; None if nothing could fill
+    fills: list[Fill] = []
+
+
+class CrossVenueEdge(BaseModel):
+    """
+    One direction of a cross-venue trade on a verified contract pair:
+    buy the same outcome on one venue, sell it on the other, at a given
+    size, after walking real depth and paying both venues' fees.
+
+    net_edge is the number that matters. It is what you would actually
+    keep, and it can be negative even when the raw quotes look
+    mispriced, because depth and fees both work against you.
+    """
+    pair_id: str
+    size: Decimal
+    buy_venue: str
+    sell_venue: str
+    buy: ExecutionQuote
+    sell: ExecutionQuote
+    gross_edge: Decimal        # sell gross - buy gross, before any fees
+    total_fees: Decimal
+    net_edge: Decimal          # sell net - buy net; the real number
+    net_per_contract: Decimal | None
+    executable: bool           # both legs fully filled at this size
