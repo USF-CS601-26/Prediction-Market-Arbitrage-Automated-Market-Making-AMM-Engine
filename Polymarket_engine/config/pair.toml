@@ -16,7 +16,7 @@ rate = "0"
 exponent = "1"
 
 [kalshi]
-ticker = ""   # TODO: Kalshi market ticker
+ticker = "KXLEADERSOUT-27JAN01-BNETISR"
 
 [verification]
 verified_by = []
@@ -24,7 +24,8 @@ verified_on = ""
 criteria_match = false   # set to true once both rule texts are confirmed equivalent
 notes = [
     "Polymarket: YES if Netanyahu ceases to be Prime Minister of Israel for any period of time between market creation and 2026-12-31 (ET).",
-    "Polymarket: an ANNOUNCED resignation/removal before the end date resolves YES immediately, even if it takes effect later. Confirm Kalshi treats announcements the same way.",
+    "Kalshi: YES if Netanyahu leaves office before Jan 1, 2027. Same window as Polymarket (checked by Joshua, 2026-10-05).",
+    "Both venues resolve YES on an ANNOUNCED departure, not only an actual one. Matches (checked by Joshua, 2026-10-05).",
     "Polymarket resolution source: official information from Netanyahu and the government of Israel; consensus of credible reporting may also be used.",
-    "Check how Kalshi treats a caretaker/transitional period after an election (still PM vs. out).",
+    "OPEN: neither rule text says whether a caretaker/transitional period after an election counts as still in office. Must be settled before criteria_match = true."
 ]
