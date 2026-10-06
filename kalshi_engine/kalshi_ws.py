@@ -24,6 +24,7 @@ Handles Kalshi's bid-only yes/no book structure by translating:
 """
 
 import asyncio
+import inspect
 import json
 import os
 import random
@@ -31,6 +32,7 @@ import time as _time
 import websockets
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import NamedTuple
 from dotenv import load_dotenv
 
 from websockets.exceptions import InvalidStatus
@@ -51,6 +53,17 @@ KALSHI_ENV = os.getenv("KALSHI_ENV", "demo").lower()
 WS_URL = os.getenv("KALSHI_WS_URL") or f"{WS_HOSTS[KALSHI_ENV]}/trade-api/ws/v2"
 WS_PATH = "/trade-api/ws/v2"
 MARKET_TICKER = os.getenv("KALSHI_MARKET_TICKER")
+
+
+class RawFrame(NamedTuple):
+    """
+    One WebSocket frame exactly as received, plus local receive time.
+
+    Field names match the Polymarket client's RawFrame so a single tape
+    format and a single replay path cover both venues.
+    """
+    recv_ts_ns: int
+    text: str
 
 
 def _to_ask_price(no_price: Decimal) -> Decimal:
@@ -161,9 +174,21 @@ class KalshiWSClient:
     def __init__(self, market_ticker: str, order_book: OrderBook,
                  ping_interval: int = PING_INTERVAL,
                  ping_timeout: int = PING_TIMEOUT,
-                 max_backoff: float = MAX_BACKOFF):
+                 max_backoff: float = MAX_BACKOFF,
+                 on_raw=None, on_update=None):
         self.market_ticker = market_ticker
         self.order_book = order_book
+        # on_raw(RawFrame)   — every frame, BEFORE parsing, so a tape stays
+        #                      faithful even if the parser has a bug.
+        # on_update(client)  — after a snapshot or delta is applied, so a
+        #                      consumer can recompute on change instead of
+        #                      polling. Read .order_book and .book_is_fresh.
+        # Either may be sync or async. Both are called on the ingest path:
+        # a slow callback is backpressure on the feed, so keep them cheap
+        # and hand off anything expensive to another task.
+        self.on_raw = on_raw
+        self.on_update = on_update
+        self._callback_errors = 0
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout
         self.max_backoff = max_backoff
@@ -269,7 +294,32 @@ class KalshiWSClient:
             await self._subscribe()
 
             async for raw_msg in ws:
+                if self.on_raw is not None:
+                    await self._fire(self.on_raw,
+                                     RawFrame(recv_ts_ns=_time.time_ns(), text=raw_msg))
                 await self._handle_message(json.loads(raw_msg))
+
+    async def _fire(self, cb, arg):
+        """
+        Invokes a user callback, awaiting it if it is a coroutine.
+
+        A raising callback is reported but never kills the feed —
+        ingestion staying up matters more than any one consumer, and a
+        dropped connection would lose book state too. Errors are
+        counted so a persistently broken callback is visible rather
+        than silently eating every message.
+        """
+        if cb is None:
+            return
+        try:
+            r = cb(arg)
+            if inspect.isawaitable(r):
+                await r
+        except Exception as e:
+            self._callback_errors += 1
+            if self._callback_errors <= 3 or self._callback_errors % 100 == 0:
+                print(f"callback error #{self._callback_errors} "
+                      f"({getattr(cb, '__name__', cb)}): {type(e).__name__}: {e}")
 
     async def _send(self, payload: dict):
         payload["id"] = self._message_id
@@ -317,6 +367,7 @@ class KalshiWSClient:
             self._resyncing = False
             self._seeded = True
             self._print_top_of_book("snapshot")
+            await self._fire(self.on_update, self)
 
         elif msg_type == "orderbook_delta":
             if self._resyncing:
@@ -364,6 +415,7 @@ class KalshiWSClient:
             return
 
         self._print_top_of_book("delta")
+        await self._fire(self.on_update, self)
 
     def _print_top_of_book(self, label: str):
         bid, ask = self.order_book.get_top_of_book()
@@ -374,14 +426,43 @@ class KalshiWSClient:
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Stream one Kalshi market's order book.")
+    parser.add_argument("--ticker", default=MARKET_TICKER,
+                        help="market ticker (default: KALSHI_MARKET_TICKER from .env)")
+    parser.add_argument("--record", nargs="?", const="auto", default=None,
+                        metavar="PATH",
+                        help="record raw frames to a replayable tape "
+                             "(default path under fixtures/)")
+    args = parser.parse_args()
+
     async def main():
+        from tape import TapeRecorder, default_tape_path
+
+        recorder = None
+        if args.record is not None:
+            path = (default_tape_path(args.ticker) if args.record == "auto"
+                    else args.record)
+            recorder = TapeRecorder(path)
+            print(f"Recording raw frames to {path}")
+
         try:
             print("Starting connection attempt...", flush=True)
-            book = OrderBook(market_id=MARKET_TICKER, exchange="kalshi")
-            client = KalshiWSClient(market_ticker=MARKET_TICKER, order_book=book)
+            book = OrderBook(market_id=args.ticker, exchange="kalshi")
+            client = KalshiWSClient(
+                market_ticker=args.ticker, order_book=book,
+                on_raw=recorder.write if recorder else None,
+            )
             await client.run_forever()
+        except KeyboardInterrupt:
+            pass
         except Exception:
             import traceback
             traceback.print_exc()
+        finally:
+            if recorder:
+                recorder.close()
+                print(f"\nWrote {recorder.frames_written} frames to {recorder.path}")
 
     asyncio.run(main())
