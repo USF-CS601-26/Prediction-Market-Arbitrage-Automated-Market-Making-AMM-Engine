@@ -43,12 +43,12 @@ run run_pair.py
 
 ### Junyu:
 **Main types of tasks**
-- Scaffolding: the structure of `Polymarket_engine`  and the combined entry point `run_pair.py`.
+- **Scaffolding:** the structure of `Polymarket_engine`  and the combined entry point `run_pair.py`.
 - **API integration:** Polymarket's Gamma API and CLOB WebSocket, connecting my feed to
   the shared `models.py` / `OrderBook`, and wiring both venues' streams into the spread engine.
 - **Generating tests:** unit tests, the synthetic-fixture runner, fee tests based on
   Polymarket's published fee table, and the replay tests on our recorded tapes.
-- **Debugging and explanations:** reading teammate code, Git workflow, and diagnosing
+- **Debugging and explanations:** reading teammate code and diagnosing
   problems found on real data.
 
 **Examples of substantial AI-assisted parts**
@@ -60,8 +60,8 @@ run run_pair.py
 
 **How I reviewed, tested and modified the code**
 - Made the design decisions myself: 
-  using live WebSocket streams instead of REST snapshots for the demo, and importing the shared
+  e.g. using live WebSocket streams instead of REST snapshots for the demo, and importing the shared
   files instead of copying them.
-- Checked expected values by hand, e.g. the first replayed edge
+- write synthetic test cases 
 - Modified AI code where it didn't fit: I changed `taker_fee` to `(shares, price, fees)`
   to match the Kalshi fee functions. 
