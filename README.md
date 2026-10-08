@@ -10,7 +10,7 @@ Required Features:
 
 Milestone 1 status: Features 1, 2, 4, 5 are done. Featrue 3 is partially done. Featrue 6 is open.
 
-##How to use it:
+## How to use it:
 
 run run_pair.py
 
@@ -39,9 +39,9 @@ run run_pair.py
 | Inspect a Polymarket tape message by message | `python -m polymarket.inspect_tape <TAPE>` (run inside the `Polymarket_engine` folder) |
 | Add the tapes to the repo as test data | `git add` only the two `.jsonl` files; before committing, run `git status` to make sure `.env` isn't included |
 
-##AI Use
+## AI Use
 
-###Junyu:
+### Junyu:
 **Main types of tasks**
 - Scaffolding: the structure of `Polymarket_engine`  and the combined entry point `run_pair.py`.
 - **API integration:** Polymarket's Gamma API and CLOB WebSocket, connecting my feed to
