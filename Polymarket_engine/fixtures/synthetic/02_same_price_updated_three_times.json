@@ -1,0 +1,20 @@
+{
+  "description": "The 0.41 bid is updated three times in separate frames. size is the NEW TOTAL, not an increment, so only the last value (5) remains: 10 -> 25 -> 5, not 10 + 25 + 5.",
+  "frames": [
+    [
+      {"event_type": "book", "asset_id": "YES",
+       "bids": [{"price": "0.40", "size": "100"}],
+       "asks": [{"price": "0.60", "size": "100"}]}
+    ],
+    {"event_type": "price_change", "price_changes": [{"asset_id": "YES", "price": "0.41", "size": "10", "side": "BUY"}]},
+    {"event_type": "price_change", "price_changes": [{"asset_id": "YES", "price": "0.41", "size": "25", "side": "BUY"}]},
+    {"event_type": "price_change", "price_changes": [{"asset_id": "YES", "price": "0.41", "size": "5", "side": "BUY"}]}
+  ],
+  "expected": {
+    "YES": {
+      "valid": true,
+      "bids": [["0.41", "5"], ["0.40", "100"]],
+      "asks": [["0.60", "100"]]
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "description": "After a disconnect the book is invalid and updates are dropped. The next snapshot fully replaces the old book: none of the old levels survive.",
+  "frames": [
+    [
+      {"event_type": "book", "asset_id": "YES",
+       "bids": [{"price": "0.40", "size": "100"}, {"price": "0.41", "size": "50"}],
+       "asks": [{"price": "0.60", "size": "100"}]}
+    ],
+    "DISCONNECT",
+    {"event_type": "price_change", "price_changes": [{"asset_id": "YES", "price": "0.45", "size": "999", "side": "BUY"}]},
+    [
+      {"event_type": "book", "asset_id": "YES",
+       "bids": [{"price": "0.30", "size": "7"}],
+       "asks": [{"price": "0.70", "size": "8"}]}
+    ]
+  ],
+  "expected": {
+    "YES": {
+      "valid": true,
+      "bids": [["0.30", "7"]],
+      "asks": [["0.70", "8"]]
+    },
+    "stats": {"disconnects": 1, "dropped_before_snapshot": 1, "snapshots": 2}
+  }
+}

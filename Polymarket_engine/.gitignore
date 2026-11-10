@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments (keep them outside the repo)
+venv/
+.venv/
+env/
+
+# Secrets: API keys must never be committed (e.g. Kalshi private keys)
+.env
+*.pem
+*.key
+
+# OS and editor clutter
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
