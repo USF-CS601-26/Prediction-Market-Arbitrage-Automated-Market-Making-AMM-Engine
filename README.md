@@ -8,7 +8,58 @@ Required Features:
 5.	Executable Spread & Fee Engine: Calculates net spreads incorporating non-linear taker fee schedules and depth constraints.
 6.	Event & Snapshot Persistence: PostgreSQL integration via SQLAlchemy/asyncpg for logging arbitrage events and book snapshots.
 
-Milestone 1 status: Features 1, 2, 4, 5 are done. Featrue 3 is partially done. Featrue 6 is open.
+Milestone 1 status: Features 1, 2, 4, 5 are done. Feature 3 is partially done. Feature 6 is open.
+
+Milestone 2 adds the trading side on top of that ingestion layer:
+
+7. **Execution layer:** `BaseExecutor` plus mock Kalshi and Polymarket venues that
+   fill against the live order book with latency, partial fills and rejections,
+   routed by an `OrderExecutorFactory`.
+8. **Arbitrage strategy:** complementary-pair detection (buy YES on one venue, NO on
+   the other, for a certain $1.00 payout), sized by walking real depth, priced through
+   both venues' non-linear fee schedules, and gated by a sentiment-driven threshold.
+9. **Risk seam:** the `RiskManager` protocol (`check_order` / `record_fill`) and a
+   reference `SimplePortfolioManager`.
+10. **End-to-end pipeline:** both feeds, sentiment, strategies, mock execution and a
+    SQLite event log, runnable live or as a repeatable replay over recorded tapes.
+
+Feature 6 (PostgreSQL persistence) is still open; `engine/persistence.py` is the sink
+interface it plugs into, with a working SQLite implementation in the meantime.
+
+## Architecture
+
+See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for the component map, the
+arbitrage math, and the design decisions behind the execution and unwind paths.
+
+The short version — three layers, with market data flowing up and orders flowing down:
+
+| Folder | What it owns |
+|---|---|
+| `kalshi_engine/` | Kalshi WebSocket feed, L2 book, quadratic fee schedule, depth-walking spread engine |
+| `Polymarket_engine/` | Polymarket CLOB feed, one L2 book per outcome token, fee schedule |
+| `engine/` | Venue-neutral trading layer: executors, arbitrage strategy, risk seam, sentiment, persistence, pipeline |
+
+`kalshi_engine/models.py` holds the shared **market data** contracts;
+`engine/models.py` holds the **order** contracts. The ingestion engines have no
+dependency on the trading side.
+
+## Setup
+
+Python 3.12 or newer (the code uses `asyncio.TaskGroup` and `BaseExceptionGroup`).
+
+```bash
+python3 -m venv kalshi_engine/venv
+kalshi_engine/venv/bin/pip install -r kalshi_engine/requirements.txt
+kalshi_engine/venv/bin/pip install -r Polymarket_engine/requirements.txt
+```
+
+Everything offline — the replay pipeline and all 123 tests in `tests/` — runs with
+just that. Two optional extras:
+
+| You want | You need |
+|---|---|
+| Live Kalshi data | `kalshi_engine/.env` with `KALSHI_ENV=prod`, a production Key ID and a private key path (see `kalshi_engine/.env.example`). Polymarket's public feed needs no credentials. |
+| Live sentiment from Redis | `pip install redis`, and a producer writing to the `sentiment:{pair_id}` stream. Without it the pipeline uses an in-memory feed and the threshold stays at its base value. |
 
 ## How to use it:
 
@@ -38,6 +89,83 @@ run run_pair.py
 | Replay the tapes and get the same results as the live run | `python run_pair.py --replay <POLYMARKET_TAPE> <KALSHI_TAPE>` |
 | Inspect a Polymarket tape message by message | `python -m polymarket.inspect_tape <TAPE>` (run inside the `Polymarket_engine` folder) |
 | Add the tapes to the repo as test data | `git add` only the two `.jsonl` files; before committing, run `git status` to make sure `.env` isn't included |
+
+## Running the arbitrage pipeline
+
+`engine/pipeline.py` is the Milestone 2 entry point: both feeds, sentiment,
+strategies, mock execution and the event log, in one process.
+
+```bash
+# replay both recorded tapes through the full stack (offline, no credentials)
+python -m engine.pipeline \
+  --replay Polymarket_engine/fixtures/tape_polymarket_netanyahu-out-2026_20261008T062810Z.jsonl \
+           kalshi_engine/fixtures/tape_kalshi_KXLEADERSOUT-27JAN01-BNETISR_20261008T062814Z.jsonl \
+  --kalshi-fee-multiplier 1
+
+# price the edge without trading it
+python -m engine.pipeline --replay <PM_TAPE> <KS_TAPE> --kalshi-fee-multiplier 1 --dry-run
+
+# inject scored headlines and watch the threshold widen
+python -m engine.pipeline --replay <PM_TAPE> <KS_TAPE> --kalshi-fee-multiplier 1 \
+  --headline "800:0.95:Netanyahu to resign - wire" \
+  --headline "805:-0.90:Office denies resignation"
+
+# live, both venues, stopping after a minute
+python -m engine.pipeline --live --max-seconds 60 --db arb_events.db
+```
+
+| Option | What it does |
+|---|---|
+| `--replay PM_TAPE KS_TAPE` | Offline: merge both tapes on receive time and drive the whole pipeline |
+| `--live` | Both WebSocket clients (needs `kalshi_engine/.env`) |
+| `--size N` | Pairs per attempt, before depth and risk shrink it (default 100) |
+| `--dry-run` | Price and log every opportunity, dispatch nothing |
+| `--kalshi-fee-multiplier M` | Skip the fee-schedule lookup, making a replay network-free. Use `1` for the recorded tapes. |
+| `--base-threshold D` / `--lam L` | `ΔP_min = base + λ · sentiment_volatility` (defaults 0.005 and 0.05) |
+| `--headline FRAMES:SCORE:TEXT` | Replay only: inject a scored headline after N frames. Repeatable. |
+| `--db PATH` | Write opportunities, attempts and fills to a SQLite file |
+| `--redis-url URL` | Live only: consume sentiment from the `sentiment:{pair_id}` stream |
+| `--max-seconds S` | Live only: stop after S seconds |
+
+What the report tells you:
+
+| Line | Meaning |
+|---|---|
+| `edge evaluations` | Ticks where both books were fresh enough to price |
+| `opportunities priced` | Evaluations where a profitable pair existed after depth and fees |
+| `declined by dP_min` | Top of book showed an edge, but nothing cleared the threshold — the threshold doing its job |
+| `declined by pre-flight` | A leg a venue would have rejected on sight, so the pair was not sent |
+| `dispatched` / `vetoed by risk` | How many attempts reached the venues vs were stopped by a position limit |
+| `pairs matched` | Both legs filled — the only pairs carrying the certain $1.00 payout |
+| `locked profit` | $1.00 per matched pair minus everything actually paid, unwinds included |
+| `naked after unwind` | Excess that could **not** be flattened. Should be 0; anything else needs a look. |
+
+> The pipeline prints a warning on every run because
+> `Polymarket_engine/config/pair.toml` still has `criteria_match = false`. Until both
+> rule texts are confirmed equivalent, every edge it reports is provisional.
+
+## Tests
+
+```bash
+# cross-venue suite: executors, arbitrage math, strategy, replay integration
+python -m pytest tests                  # 123 tests, ~110s (the replays dominate)
+python -m pytest tests -m "not slow"    # 107 tests, ~3s, no tape replays
+
+# the per-venue suites, run from their own folders
+cd kalshi_engine     && python -m pytest tests   # 33 tests; reaches the live Kalshi API
+cd Polymarket_engine && python -m pytest tests
+```
+
+| File | Covers |
+|---|---|
+| `tests/test_arbitrage_math.py` | Pair arithmetic on hand-calculated fixtures, depth-walk edge cases, the quadratic fee curve, threshold and slippage, and a cross-check that the complementary-pair engine agrees exactly with `cross_venue_spread.py` |
+| `tests/test_executors.py` | Depth walking, limit truncation, partial fills, every rejection reason, latency bands, seeded determinism, cancellation races, fill listeners, factory routing |
+| `tests/test_arbitrage_strategy.py` | Paired dispatch, risk veto and shrink, pre-flight, and every leg-mismatch path including naked-position reporting |
+| `tests/test_sentiment_threshold.py` | Threshold formula and cap, rolling-window statistics, Redis stream parsing and failure handling |
+| `tests/test_pipeline_replay.py` | The whole stack over the recorded tapes, plus both proposal use cases |
+| `tests/test_pair_replay.py` | Milestone 1's recorded-tape test for the same-outcome spread |
+
+Everything in `tests/` is offline: no network, no credentials, no Redis.
 
 ## AI Use
 
@@ -115,3 +243,75 @@ run run_pair.py
 - Agreed with Junyu's review that the demo should use live WebSocket streams
   rather than the one-shot REST sampling I had used to prove the fee/depth maths,
   and added the `on_raw` / `on_update` hooks his combined entry point needed.
+
+#### Milestone 2 (arbitrage, execution and integration)
+
+**Main types of tasks**
+- **Scaffolding:** the `engine/` layer — the executor interface and mock venues,
+  the strategy base class, the risk seam, and the pipeline that wires both
+  venues' feeds to it.
+- **Arbitrage math:** the complementary-pair depth walk, the per-chunk fee and
+  slippage model, and the sentiment-driven threshold.
+- **Generating tests:** the 123 offline tests in `tests/`, including the
+  hand-calculated arbitrage fixtures and the recorded-tape integration run.
+- **Debugging:** three defects that only surfaced by running the pipeline on the
+  real tapes rather than on fixtures (below).
+
+**Examples of substantial AI-assisted parts**
+1. **Execution layer (`engine/executors/`):** the AI drafted the fill simulation
+   that walks the live book honouring the limit price, the latency/partial-fill/
+   rejection model, and the factory. The two choices worth calling out are both
+   about *not* being a stub: an unfilled remainder RESTS rather than being
+   cancelled, which is the only reason the leg-mismatch code gets exercised at
+   all; and a fill does NOT remove the depth it consumed, because the feed owns
+   the book and writing our fills into it would break the consistency checks
+   `PolymarketFeed` runs against the exchange's own top-of-book hints.
+2. **Arbitrage engine and strategy (`engine/arbitrage.py`,
+   `engine/arbitrage_strategy.py`):** pairing contracts level by level, testing
+   each chunk on its own marginal profit rather than an average, and the
+   cancel-then-flatten unwind path.
+
+**How I reviewed, tested and modified the code**
+- **Checked the premise before trusting the module.** On a binary CLOB a NO ask
+  is the mirror of a YES bid, so buying YES on A and NO on B is *the same trade*
+  as buying YES on A and selling YES on B — meaning this strategy is a
+  reformulation of the Milestone 1 same-outcome spread, not an independent one.
+  Rather than leave that unsaid, I turned it into a cross-check:
+  `test_complementary_pair_agrees_with_the_same_outcome_engine` asserts my
+  depth-pairing walk and `cross_venue_spread.py`'s separate-leg walk produce
+  identical net edges and identical fees. Two independently written code paths
+  agreeing across multi-level depth and a quadratic fee schedule is the
+  strongest evidence available that either is right.
+- **Validated a design claim against real data instead of the docs.** The AI's
+  first draft synthesized a NO book for *both* venues. That is right for Kalshi
+  (its feed gives one book) and wrong for Polymarket (its feed gives two, and a
+  NO ask and the mirroring YES bid are the same resting order, so merging would
+  double-count the liquidity and report twice the executable size). I checked
+  the mirror property on the recorded tape before relying on it: it held on all
+  2 567 ticks where both books were valid, and that check is now a test.
+- **Found three real defects by running the pipeline, not the fixtures.**
+  (a) The strategy would dispatch a leg a venue was *certain* to reject — an
+  off-tick price, or a size under Polymarket's 5-share minimum after the risk
+  layer shrank it — filling one leg and then unwinding at a guaranteed loss. I
+  added `BaseExecutor.preflight()` so a doomed leg aborts the pair instead; in
+  the fixture that exposed it, that turned a $5.00 unwind loss into no trade.
+  (b) The rolling sentiment window was measured against wall-clock time, so
+  headlines injected into a replay (which carry the tape's historical
+  timestamps) were always outside the window and every statistic read zero —
+  the threshold use case silently passed through doing nothing. `now_fn` is now
+  injectable and the pipeline points it at the replay clock.
+  (c) A `set()` declared as a class attribute on the pipeline was shared by
+  every instance, so a second pipeline in the same process would skip persisting
+  attempts the first had seen.
+- **Made the design decisions myself.** Unwinding flattens the excess rather
+  than completing the pair: completing is sometimes cheaper, but its cost is
+  unbounded exactly when the leg failed *because* the depth disappeared, and an
+  unwind path is the last place to put an unbounded cost. A risk veto on either
+  leg aborts both, because sending only the approved leg leaves precisely the
+  naked position the check just refused. `record_fill` is driven by the
+  executor's fill listener rather than by the strategy, so a resting order that
+  fills after the strategy has moved on still reaches the portfolio.
+- **Corrected the reporting when it flattered the result.** The first pipeline
+  report called every `ArbitrageAttempt` a "dispatch attempt", showing 2 563 of
+  them on an hour of tape when only 200 reached a venue and 2 363 were stopped
+  by the position limit. Dispatched and vetoed are now counted separately.
