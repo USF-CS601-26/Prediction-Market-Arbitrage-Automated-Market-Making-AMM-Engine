@@ -10,6 +10,10 @@ Required Features:
 
 Milestone 1 status: Features 1, 2, 4, 5 are done. Feature 3 is partially done. Feature 6 is open.
 
+Final status: Feature 6 is implemented (`engine/db/`, see below). Feature 3 is still
+partially done: the pair config and its verification record exist, but
+`criteria_match` is still `false` for the one configured pair.
+
 Milestone 2 adds the trading side on top of that ingestion layer:
 
 7. **Execution layer:** `BaseExecutor` plus mock Kalshi and Polymarket venues that
@@ -23,8 +27,27 @@ Milestone 2 adds the trading side on top of that ingestion layer:
 10. **End-to-end pipeline:** both feeds, sentiment, strategies, mock execution and a
     SQLite event log, runnable live or as a repeatable replay over recorded tapes.
 
-Feature 6 (PostgreSQL persistence) is still open; `engine/persistence.py` is the sink
-interface it plugs into, with a working SQLite implementation in the meantime.
+Market making, risk and persistence:
+
+11. **PortfolioManager** (`engine/portfolio_manager.py`): a thread-safe singleton
+    holding one book of positions for every strategy and venue — YES/NO inventory,
+    average cost, realized and unrealized P&L — behind `check_order`, `record_fill`
+    and `get_inventory`. Limits per market, per venue and in total, with
+    reservations so two strategies or two venues can never be approved against the
+    same room.
+12. **AMMStrategy** (`engine/amm_strategy.py`): Avellaneda-Stoikov quotes,
+    `r = s − q·γ·σ²·(T−t) + k·S·confidence` and
+    `δ = γσ²(T−t) + (2/γ)·ln(1+γ/κ)`, skewed by inventory and by the shared
+    sentiment feed, clamped to 0.01–0.99 on the tick grid, cancelled and replaced
+    only when the reservation price moves, and stopped near expiry or when the risk
+    limits are hit.
+13. **Feature 6, persistence** (`engine/db/`): PostgreSQL via SQLAlchemy's async
+    engine and asyncpg. The tables are a trade log, book snapshots, spread history,
+    sentiment features, AMM quotes and the arbitrage events. Writes are batched in
+    the background, so logging never blocks the strategy loop.
+
+See **[docs/MARKET_MAKING_RISK_PERSISTENCE.md](docs/MARKET_MAKING_RISK_PERSISTENCE.md)**
+for the AMM maths, the risk limits and the database schema.
 
 ## Architecture
 
@@ -37,7 +60,7 @@ The short version — three layers, with market data flowing up and orders flowi
 |---|---|
 | `kalshi_engine/` | Kalshi WebSocket feed, L2 book, quadratic fee schedule, depth-walking spread engine |
 | `Polymarket_engine/` | Polymarket CLOB feed, one L2 book per outcome token, fee schedule |
-| `engine/` | Venue-neutral trading layer: executors, arbitrage strategy, risk seam, sentiment, persistence, pipeline |
+| `engine/` | Venue-neutral trading layer: executors, arbitrage strategy, AMM, PortfolioManager, sentiment, persistence (`engine/db/`), pipeline |
 
 `kalshi_engine/models.py` holds the shared **market data** contracts;
 `engine/models.py` holds the **order** contracts. The ingestion engines have no
@@ -48,18 +71,18 @@ dependency on the trading side.
 Python 3.12 or newer (the code uses `asyncio.TaskGroup` and `BaseExceptionGroup`).
 
 ```bash
-python3 -m venv kalshi_engine/venv
-kalshi_engine/venv/bin/pip install -r kalshi_engine/requirements.txt
-kalshi_engine/venv/bin/pip install -r Polymarket_engine/requirements.txt
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt      # both venue engines + SQLAlchemy, asyncpg, aiosqlite, redis
 ```
 
-Everything offline — the replay pipeline and all 123 tests in `tests/` — runs with
-just that. Two optional extras:
+Everything offline — the replay pipeline and every test in `tests/` — runs with just
+that; the database tests use SQLite through the same schema. Optional extras:
 
 | You want | You need |
 |---|---|
+| PostgreSQL persistence (feature 6) | `docker compose up -d postgres`, then `--db-url postgresql+asyncpg://arb:arb@localhost:5432/arb` (or set `DATABASE_URL`) |
 | Live Kalshi data | `kalshi_engine/.env` with `KALSHI_ENV=prod`, a production Key ID and a private key path (see `kalshi_engine/.env.example`). Polymarket's public feed needs no credentials. |
-| Live sentiment from Redis | `pip install redis`, and a producer writing to the `sentiment:{pair_id}` stream. Without it the pipeline uses an in-memory feed and the threshold stays at its base value. |
+| Live sentiment from Redis | `docker compose up -d redis`, and a producer writing to the `sentiment:{pair_id}` stream. Without it the pipeline uses an in-memory feed and the threshold stays at its base value. |
 
 ## How to use it:
 
@@ -110,8 +133,15 @@ python -m engine.pipeline --replay <PM_TAPE> <KS_TAPE> --kalshi-fee-multiplier 1
   --headline "800:0.95:Netanyahu to resign - wire" \
   --headline "805:-0.90:Office denies resignation"
 
+# add AMM quoters on both venues and log everything to PostgreSQL
+docker compose up -d postgres
+python -m engine.pipeline --replay <PM_TAPE> <KS_TAPE> --kalshi-fee-multiplier 1 \
+  --amm kalshi --amm polymarket \
+  --headline "1200:0.90:Netanyahu expected to step down" \
+  --db-url postgresql+asyncpg://arb:arb@localhost:5432/arb
+
 # live, both venues, stopping after a minute
-python -m engine.pipeline --live --max-seconds 60 --db arb_events.db
+python -m engine.pipeline --live --max-seconds 60 --db-url postgresql+asyncpg://arb:arb@localhost:5432/arb
 ```
 
 | Option | What it does |
@@ -123,7 +153,10 @@ python -m engine.pipeline --live --max-seconds 60 --db arb_events.db
 | `--kalshi-fee-multiplier M` | Skip the fee-schedule lookup, making a replay network-free. Use `1` for the recorded tapes. |
 | `--base-threshold D` / `--lam L` | `ΔP_min = base + λ · sentiment_volatility` (defaults 0.005 and 0.05) |
 | `--headline FRAMES:SCORE:TEXT` | Replay only: inject a scored headline after N frames. Repeatable. |
-| `--db PATH` | Write opportunities, attempts and fills to a SQLite file |
+| `--amm VENUE` | Run an AMM quoter on `kalshi` or `polymarket` (repeatable) |
+| `--amm-gamma G` / `--amm-kappa K` / `--amm-k K` / `--amm-size N` | AMM risk aversion, order-arrival decay, sentiment drift, quote size (defaults 2, 100, 0.02, 10) |
+| `--db-url URL` | Feature 6: write every event family to this SQLAlchemy async URL (default `$DATABASE_URL`) |
+| `--db PATH` | Older events-only sink: opportunities, attempts and fills to a SQLite file |
 | `--redis-url URL` | Live only: consume sentiment from the `sentiment:{pair_id}` stream |
 | `--max-seconds S` | Live only: stop after S seconds |
 
@@ -139,6 +172,8 @@ What the report tells you:
 | `pairs matched` | Both legs filled — the only pairs carrying the certain $1.00 payout |
 | `locked profit` | $1.00 per matched pair minus everything actually paid, unwinds included |
 | `naked after unwind` | Excess that could **not** be flattened. Should be 0; anything else needs a look. |
+| `persisted` | Rows written per table; `(N dropped)` appears only if the database fell behind or failed |
+| `AMM` | Per quoter: requotes, cancels, risk vetoes, and the last quote with its mid and inventory |
 
 > The pipeline prints a warning on every run because
 > `Polymarket_engine/config/pair.toml` still has `criteria_match = false`. Until both
@@ -148,8 +183,8 @@ What the report tells you:
 
 ```bash
 # cross-venue suite: executors, arbitrage math, strategy, replay integration
-python -m pytest tests                  # 123 tests, ~110s (the replays dominate)
-python -m pytest tests -m "not slow"    # 107 tests, ~3s, no tape replays
+python -m pytest tests                  # 194 tests (1 skipped without PostgreSQL), ~2.5 min; the replays dominate
+python -m pytest tests -m "not slow"    # 172 tests, ~10s, no tape replays
 
 # the per-venue suites, run from their own folders
 cd kalshi_engine     && python -m pytest tests   # 33 tests; reaches the live Kalshi API
@@ -164,8 +199,18 @@ cd Polymarket_engine && python -m pytest tests
 | `tests/test_sentiment_threshold.py` | Threshold formula and cap, rolling-window statistics, Redis stream parsing and failure handling |
 | `tests/test_pipeline_replay.py` | The whole stack over the recorded tapes, plus both proposal use cases |
 | `tests/test_pair_replay.py` | Milestone 1's recorded-tape test for the same-outcome spread |
+| `tests/test_portfolio_manager.py` | Singleton under 32 racing threads, concurrent fills and risk checks, average cost and P&L, inventory across Polymarket's two tokens, every limit, reservations |
+| `tests/test_amm_strategy.py` | The formulas by hand, inventory and sentiment skew direction, clamping and post-only, volatility and confidence, cancel/replace, risk vetoes, expiry, resting fills |
+| `tests/test_persistence_db.py` | Every table and row builder, exact Decimal round trip, batching, non-blocking under a slow or failing database; a PostgreSQL round trip when `TEST_DATABASE_URL` is set |
+| `tests/test_amm_pipeline.py` | The real AMM on the tapes: quote skew on a headline and its decay, every event family persisted, AMM and arbitrage sharing one set of limits |
 
-Everything in `tests/` is offline: no network, no credentials, no Redis.
+Everything in `tests/` is offline: no network, no credentials, no Redis. The one
+PostgreSQL test is skipped unless `TEST_DATABASE_URL` points at a server:
+
+```bash
+docker compose up -d postgres
+TEST_DATABASE_URL=postgresql+asyncpg://arb:arb@localhost:5432/arb python -m pytest tests -m postgres
+```
 
 ## AI Use
 

@@ -31,9 +31,11 @@ Run it:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import heapq
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -42,15 +44,17 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 import engine  # noqa: F401  (sys.path bootstrap for both venue engines)
+from engine.amm_strategy import AMMConfig, AMMQuote, AMMStrategy, sentiment_features
 from engine.arbitrage import DynamicThreshold, SlippageModel, kalshi_quotes, polymarket_quotes
 from engine.arbitrage_strategy import ArbitrageStrategy
 from engine.executors import MockKalshiExecutor, MockPolymarketExecutor, OrderExecutorFactory
+from engine.executors.base import OrderNotFound
 from engine.executors.simulator import SimulationConfig
 from engine.models import Fill
-from engine.persistence import EventSink, NullEventSink, SqliteEventSink
-from engine.portfolio import SimplePortfolioManager
+from engine.persistence import EventSink, make_sink
+from engine.portfolio_manager import PortfolioManager, RiskLimits
 from engine.sentiment import InMemorySentimentFeed, RedisSentimentFeed
-from engine.strategy import BaseStrategy
+from engine.strategy import BaseStrategy, StrategyResult
 
 # both venue engines, reached via the engine package's path bootstrap
 from kalshi_fees import fetch_fee_schedule, series_ticker
@@ -99,7 +103,10 @@ class PipelineConfig:
     slippage: SlippageModel = field(default_factory=SlippageModel)
     kalshi_fee_multiplier: Decimal | None = None   # set to skip the network lookup
     dry_run: bool = False
-    db_path: str | None = None                  # None = NullEventSink
+    db_path: str | None = None                  # SQLite file, arbitrage events only
+    db_url: str | None = None                   # feature 6: postgresql+asyncpg://... (wins over db_path)
+    snapshot_interval: timedelta = timedelta(seconds=5)   # periodic book/spread/sentiment rows
+    snapshot_depth: int = 10                    # levels per side in a book snapshot
     redis_url: str | None = None                # None = InMemorySentimentFeed
     sentiment_window: timedelta = timedelta(minutes=5)
     seed: int | None = 0                        # executor RNG seed; None = random
@@ -109,6 +116,11 @@ class PipelineConfig:
     polymarket_sim: SimulationConfig | None = None
     max_position: Decimal = Decimal("1000")
     cash: Decimal = Decimal("10000")
+    # the full limit set; when None, RiskLimits defaults with max_position applied
+    risk_limits: RiskLimits | None = None
+    # venues to run an AMM quoter on ("kalshi", "polymarket"); empty = arbitrage only
+    amm_venues: tuple[str, ...] = ()
+    amm: AMMConfig = field(default_factory=AMMConfig)
 
 
 class PipelineReport(BaseModel):
@@ -132,7 +144,9 @@ class PipelineReport(BaseModel):
     polymarket_check_failures: int = 0
     kalshi_sequence_gaps: int = 0
     db_counts: dict[str, int] = Field(default_factory=dict)
+    db_dropped: int = 0
     portfolio: str = ""
+    amm: list[str] = Field(default_factory=list)       # one summary line per AMM
     errors: list[str] = Field(default_factory=list)   # live mode: tasks that died
 
     @property
@@ -164,9 +178,18 @@ class PipelineReport(BaseModel):
             f"headlines injected:     {self.headlines_injected}",
             f"Polymarket check fails: {self.polymarket_check_failures}",
             f"Kalshi sequence gaps:   {self.kalshi_sequence_gaps}",
-            f"persisted:              {self.db_counts}",
+            f"persisted:              {self.db_counts}"
+            + (f"  ({self.db_dropped} dropped)" if self.db_dropped else ""),
             f"portfolio:              {self.portfolio}",
-        ] + ([f"ERRORS:                 {'; '.join(self.errors)}"] if self.errors else []))
+        ] + [f"AMM:                    {line}" for line in self.amm]
+          + ([f"ERRORS:                 {'; '.join(self.errors)}"] if self.errors else []))
+
+
+def _mid(book: OrderBook) -> Decimal | None:
+    bid, ask = book.get_top_of_book()
+    if bid is None or ask is None:
+        return None
+    return (bid.price + ask.price) / 2
 
 
 def kalshi_fee_function(ticker: str, multiplier: Decimal | None):
@@ -228,10 +251,21 @@ class ArbitragePipeline:
                                                    now_fn=self.clock)
 
         # --- risk and persistence ---
-        self.portfolio = SimplePortfolioManager(
-            cash=self.config.cash, max_position_per_market=self.config.max_position)
-        self.sink: EventSink = (SqliteEventSink(self.config.db_path)
-                                if self.config.db_path else NullEventSink())
+        # The process-wide PortfolioManager, reset for this run: one book of
+        # positions for every strategy and venue is what stops the arbitrage
+        # strategy and the AMM over-allocating against each other. Both
+        # venues' YES/NO ids are registered under the pair's id, so per-market
+        # limits and get_inventory see a Polymarket market's two tokens as one.
+        limits = self.config.risk_limits or RiskLimits(
+            max_position_per_market=self.config.max_position)
+        self.portfolio = PortfolioManager.instance().reset(limits, cash=self.config.cash)
+        self.portfolio.register_market("kalshi", pair.pair_id, {"YES": ticker, "NO": ticker})
+        self.portfolio.register_market("polymarket", pair.pair_id,
+                                       {"YES": pair.polymarket.yes_token,
+                                        "NO": pair.polymarket.no_token})
+        self.sink: EventSink = make_sink(
+            self.config.db_path, self.config.db_url,
+            **({"snapshot_depth": self.config.snapshot_depth} if self.config.db_url else {}))
 
         # --- execution ---
         self.factory = OrderExecutorFactory()
@@ -241,6 +275,16 @@ class ArbitragePipeline:
         self.strategies: list[BaseStrategy] = []
         self.arbitrage = self._build_arbitrage_strategy()
         self.add_strategy(self.arbitrage)
+        self.amms: list[AMMStrategy] = [self._build_amm(v) for v in self.config.amm_venues]
+        for amm in self.amms:
+            self.add_strategy(amm)
+
+        # --- throttles for the periodic persistence rows ---
+        self._last_snapshot: datetime | None = None
+        self._last_spread: tuple | None = None
+        self._last_spread_at: datetime | None = None
+        self._last_sentiment: tuple | None = None
+        self._last_sentiment_at: datetime | None = None
 
         # change detection, same mechanism run_pair uses
         self.kalshi_version = 0
@@ -314,6 +358,34 @@ class ArbitragePipeline:
             tick_size=pm.tick_size,
         )
 
+    def _build_amm(self, venue: str) -> AMMStrategy:
+        """
+        An AMM quoter on one venue's YES book. It shares the factory, the
+        PortfolioManager (its inventory and limits) and the sentiment feed
+        with the arbitrage strategy, and uses the market's end date for T - t.
+        """
+        pm = self.pair.polymarket
+        expiry = self.config.amm.expiry or pm.end_date
+        if venue == "kalshi":
+            def book():
+                return self.kalshi_book if self.kalshi.book_is_fresh else None
+            yes_id = no_id = self.ticker
+            tick = Decimal("0.01")
+        elif venue == "polymarket":
+            def book():
+                # the ask side buys NO, so both token books must be usable
+                if self.poly_feed.is_valid("YES") and self.poly_feed.is_valid("NO"):
+                    return self.poly_feed.book("YES")
+                return None
+            yes_id, no_id = pm.yes_token, pm.no_token
+            tick = pm.tick_size
+        else:
+            raise ValueError(f"no AMM support for venue {venue!r}")
+        config = dataclasses.replace(self.config.amm, tick_size=tick, expiry=expiry)
+        return AMMStrategy(self.pair.pair_id, venue, self.pair.pair_id, yes_id, no_id,
+                           book, self.factory, self.portfolio, sentiment=self.sentiment,
+                           config=config)
+
     def add_strategy(self, strategy: BaseStrategy) -> None:
         """
         Register another strategy on the same tick — this is the seam Person
@@ -337,27 +409,147 @@ class ArbitragePipeline:
         return True
 
     async def tick(self, now: datetime) -> None:
-        """Give every strategy one chance to act, and persist what they saw."""
+        """
+        One book change: let the mock venues match resting orders against the
+        new prices, give every strategy one chance to act, persist what they
+        saw, and release risk capacity held by orders that are no longer live.
+        """
         self.ticks += 1
+        await self._match_resting()
+        self._update_marks()
         volatility = self.sentiment.volatility(self.pair.pair_id)
         for strategy in self.strategies:
             result = await strategy.run_tick(now)
             if result is None:
                 continue
-            self._persist(strategy, volatility)
+            await self._persist(strategy, result, now, volatility)
+        self.portfolio.reconcile_reservations(self._open_order_ids())
+        self._record_periodic(now, volatility)
 
-    def _persist(self, strategy: BaseStrategy, volatility: Decimal) -> None:
-        if strategy is not self.arbitrage:
-            return                      # other strategies own their own persistence
-        self.thresholds.append(self.arbitrage.last_threshold)
-        for opportunity in self.arbitrage.last_opportunities:
+    async def _match_resting(self) -> None:
+        for executor in list(self.factory.built()):
+            match = getattr(executor, "match_resting", None)
+            if match is not None:
+                await match()
+
+    def _open_order_ids(self) -> set[str]:
+        ids = set()
+        for executor in self.factory.built():
+            for state in getattr(executor, "open_orders", lambda: [])():
+                ids.add(state.order.order_id)
+        return ids
+
+    def _update_marks(self) -> None:
+        """Mark every position at its book's mid, for unrealized P&L."""
+        if self.kalshi.book_is_fresh:
+            mid = _mid(self.kalshi_book)
+            self.portfolio.set_mark("kalshi", self.ticker, "YES", mid)
+            self.portfolio.set_mark("kalshi", self.ticker, "NO",
+                                    None if mid is None else Decimal(1) - mid)
+        pm = self.pair.polymarket
+        for outcome, token in (("YES", pm.yes_token), ("NO", pm.no_token)):
+            if self.poly_feed.is_valid(outcome):
+                self.portfolio.set_mark("polymarket", token, outcome,
+                                        _mid(self.poly_feed.book(outcome)))
+
+    async def _persist(self, strategy: BaseStrategy, result: StrategyResult,
+                       now: datetime, volatility: Decimal) -> None:
+        if strategy is self.arbitrage:
+            self._persist_arbitrage(now, volatility)
+        elif isinstance(result.detail, AMMQuote) and result.detail.action != "hold":
+            await self._persist_amm(result.detail, now)
+
+    def _persist_arbitrage(self, now: datetime, volatility: Decimal) -> None:
+        arb = self.arbitrage
+        self.thresholds.append(arb.last_threshold)
+        for opportunity in arb.last_opportunities:
             if opportunity.size > 0:
-                self.sink.record_opportunity(opportunity, self.arbitrage.last_threshold,
-                                             volatility)
-        if len(self.arbitrage.attempts) > self._attempts_persisted:
-            for attempt in self.arbitrage.attempts[self._attempts_persisted:]:
+                self.sink.record_opportunity(opportunity, arb.last_threshold, volatility)
+
+        # spread history: whenever the cross-venue top of book or the
+        # threshold changes, and on the periodic interval otherwise
+        if arb.last_quotes:
+            from engine.db.rows import tops_of                  # noqa: PLC0415
+            key = (json.dumps(tops_of(arb.last_quotes), sort_keys=True), arb.last_threshold)
+            if key != self._last_spread or self._due(self._last_spread_at, now):
+                self.sink.record_spread(now, self.pair.pair_id, arb.last_quotes,
+                                        arb.last_opportunities, arb.last_threshold, volatility)
+                self._last_spread, self._last_spread_at = key, now
+
+        if len(arb.attempts) > self._attempts_persisted:
+            for attempt in arb.attempts[self._attempts_persisted:]:
                 self.sink.record_attempt(attempt)
-            self._attempts_persisted = len(self.arbitrage.attempts)
+                for state in (attempt.yes_state, attempt.no_state, *attempt.unwind_states):
+                    if state is not None:
+                        self.sink.record_order(state, now)
+                if attempt.dispatched:
+                    self._record_books(now, "event")
+            self._attempts_persisted = len(arb.attempts)
+
+    async def _persist_amm(self, quote: AMMQuote, now: datetime) -> None:
+        self.sink.record_amm_quote(quote)
+        for state in quote.placed:
+            self.sink.record_order(state, now)
+        for order_id in quote.cancelled:
+            for executor in self.factory.built():
+                try:
+                    self.sink.record_order(await executor.get_status(order_id), now)
+                    break
+                except OrderNotFound:
+                    continue
+        if quote.action == "requote":
+            self._record_books(now, "event")
+
+    def _due(self, last: datetime | None, now: datetime) -> bool:
+        return last is None or now - last >= self.config.snapshot_interval
+
+    def _record_periodic(self, now: datetime, volatility: Decimal) -> None:
+        """Book snapshots on the interval; sentiment features when they change."""
+        if self._due(self._last_snapshot, now):
+            self._record_books(now, "periodic")
+            self._last_snapshot = now
+
+        level, confidence, n = sentiment_features(self.sentiment, self.pair.pair_id,
+                                                  self.config.amm.min_points_for_confidence)
+        latest = self.sentiment.latest(self.pair.pair_id)
+        key = (level, volatility, confidence, n, latest.timestamp if latest else None)
+        if key != self._last_sentiment or self._due(self._last_sentiment_at, now):
+            self.sink.record_sentiment(now, self.pair.pair_id, level, volatility, confidence,
+                                       n, latest if n else None, self.arbitrage.last_threshold)
+            self._last_sentiment, self._last_sentiment_at = key, now
+
+    def _record_books(self, now: datetime, reason: str) -> None:
+        if self.kalshi.book_is_fresh and (self.kalshi_book.bids or self.kalshi_book.asks):
+            self.sink.record_book_snapshot(now, "kalshi", self.ticker, "YES",
+                                           self.kalshi_book, reason)
+        pm = self.pair.polymarket
+        for outcome, token in (("YES", pm.yes_token), ("NO", pm.no_token)):
+            if self.poly_feed.is_valid(outcome):
+                self.sink.record_book_snapshot(now, "polymarket", token, outcome,
+                                               self.poly_feed.book(outcome), reason)
+
+    # ---- sink lifecycle ----
+
+    async def _open_sink(self, mode: str) -> None:
+        start = getattr(self.sink, "start", None)
+        if start is not None:
+            await start(mode=mode, pair_id=self.pair.pair_id, config={
+                "ticker": self.ticker, "size": self.config.size,
+                "dry_run": self.config.dry_run, "amm_venues": ",".join(self.config.amm_venues),
+                "threshold_base": self.config.threshold.base,
+                "threshold_lam": self.config.threshold.lam,
+                "max_position": self.portfolio.limits.max_position_per_market,
+            })
+
+    async def _close_sink(self) -> None:
+        aclose = getattr(self.sink, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+    async def _yield_to_writer(self) -> None:
+        """A replay never sleeps; give the batch writer a turn when rows pile up."""
+        if getattr(self.sink, "pending", 0) >= getattr(self.sink, "batch_size", 1 << 30):
+            await asyncio.sleep(0)
 
     # ---- replay ----
 
@@ -374,6 +566,17 @@ class ArbitragePipeline:
         self.kalshi.connected = True          # a replayed session owns its book
         headlines = sorted(headlines or [], key=lambda h: h.after_frames)
         next_headline = 0
+        await self._open_sink("replay")
+        try:
+            frames = await self._replay_frames(poly_tape_path, kalshi_tape_path,
+                                               headlines, next_headline, verbose)
+        finally:
+            await self._close_sink()
+        return self.report(frames)
+
+    async def _replay_frames(self, poly_tape_path, kalshi_tape_path,
+                             headlines: list[ScriptedHeadline], next_headline: int,
+                             verbose: bool) -> int:
 
         timeline = heapq.merge(
             ((f.recv_ts_ns, 0, f) for f in poly_tape.load_tape(str(poly_tape_path))),
@@ -402,9 +605,10 @@ class ArbitragePipeline:
 
             if self._books_changed():
                 await self.tick(now)
+                await self._yield_to_writer()
 
         self.poly_feed.settle()               # run the end-of-group checks once more
-        return self.report(frames)
+        return frames
 
     # ---- live ----
 
@@ -440,6 +644,7 @@ class ArbitragePipeline:
         # returning — but it must NOT be swallowed silently, which is what a
         # bare `return` inside a `finally` would do.
         errors: list[str] = []
+        await self._open_sink("live")
         try:
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(self.kalshi.run_forever())
@@ -452,6 +657,10 @@ class ArbitragePipeline:
             for exc in group.exceptions:
                 log.error("live run stopped: %s: %s", type(exc).__name__, exc)
                 errors.append(f"{type(exc).__name__}: {exc}")
+        finally:
+            for amm in self.amms:               # leave nothing resting at the venues
+                await amm.cancel_all()
+            await self._close_sink()
 
         report = self.report(0)
         report.errors = errors
@@ -462,7 +671,7 @@ class ArbitragePipeline:
     def report(self, frames: int) -> PipelineReport:
         arb = self.arbitrage
         attempts = arb.attempts
-        counts = self.sink.counts() if isinstance(self.sink, SqliteEventSink) else {}
+        counts = self.sink.counts() if hasattr(self.sink, "counts") else {}
         return PipelineReport(
             pair_id=self.pair.pair_id,
             frames_replayed=frames,
@@ -484,7 +693,9 @@ class ArbitragePipeline:
             polymarket_check_failures=self.poly_feed.check_failures(),
             kalshi_sequence_gaps=getattr(self.kalshi, "sequence_gaps", 0),
             db_counts=counts,
+            db_dropped=getattr(self.sink, "dropped", 0),
             portfolio=self.portfolio.summary(),
+            amm=[amm.summary() for amm in self.amms],
         )
 
     def close(self) -> None:
@@ -512,7 +723,17 @@ def main() -> None:
     p.add_argument("--replay", nargs=2, metavar=("POLYMARKET_TAPE", "KALSHI_TAPE"))
     p.add_argument("--live", action="store_true")
     p.add_argument("--max-seconds", type=float, help="live mode: stop after this long")
-    p.add_argument("--db", help="write events to this SQLite file")
+    p.add_argument("--db", help="write arbitrage events to this SQLite file")
+    p.add_argument("--db-url", default=os.environ.get("DATABASE_URL"),
+                   help="feature 6: full persistence to this SQLAlchemy async URL, e.g. "
+                        "postgresql+asyncpg://arb:arb@localhost:5432/arb (default: $DATABASE_URL)")
+    p.add_argument("--amm", action="append", default=[], choices=["kalshi", "polymarket"],
+                   help="run an AMM quoter on this venue (repeatable)")
+    p.add_argument("--amm-gamma", type=float, default=AMMConfig.gamma)
+    p.add_argument("--amm-kappa", type=float, default=AMMConfig.kappa)
+    p.add_argument("--amm-k", type=float, default=AMMConfig.k_sentiment,
+                   help="AMM sentiment drift: $ shift at S x confidence = 1")
+    p.add_argument("--amm-size", type=Decimal, default=AMMConfig.quote_size)
     p.add_argument("--redis-url", help="live mode: consume sentiment from this Redis")
     p.add_argument("--dry-run", action="store_true", help="price and log, dispatch nothing")
     p.add_argument("--kalshi-fee-multiplier", type=Decimal,
@@ -529,9 +750,12 @@ def main() -> None:
         p.error("choose --replay or --live")
 
     config = PipelineConfig(
-        size=a.size, dry_run=a.dry_run, db_path=a.db, redis_url=a.redis_url,
+        size=a.size, dry_run=a.dry_run, db_path=a.db, db_url=a.db_url, redis_url=a.redis_url,
         kalshi_fee_multiplier=a.kalshi_fee_multiplier,
         threshold=DynamicThreshold(base=a.base_threshold, lam=a.lam),
+        amm_venues=tuple(dict.fromkeys(a.amm)),
+        amm=AMMConfig(gamma=a.amm_gamma, kappa=a.amm_kappa, k_sentiment=a.amm_k,
+                      quote_size=a.amm_size),
     )
     pipeline = build_pipeline(a.pair_config, a.kalshi_ticker, config, offline=not a.live)
     print(f"pair {pipeline.pair.pair_id}: Polymarket {pipeline.pair.polymarket.slug} "
@@ -561,6 +785,8 @@ def main() -> None:
         print(report.describe())
         print()
         print(pipeline.arbitrage.summary())
+        if getattr(pipeline.sink, "run_id", None):
+            print(f"database run_id: {pipeline.sink.run_id}")
     finally:
         pipeline.close()
 

@@ -1,0 +1,12 @@
+# Everything the repo-root pipeline and test suite need, in one install:
+#   python -m venv venv && venv/bin/pip install -r requirements.txt
+-r kalshi_engine/requirements.txt
+-r Polymarket_engine/requirements.txt
+
+# feature 6: PostgreSQL through SQLAlchemy's async engine
+sqlalchemy[asyncio]>=2.0
+asyncpg>=0.29
+aiosqlite>=0.20          # the same schema on SQLite, for offline runs and the tests
+
+# live sentiment stream (optional: replay and tests use an in-memory feed)
+redis>=5.0

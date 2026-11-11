@@ -1,0 +1,32 @@
+# Local services for the pipeline:
+#   postgres  feature 6 persistence  ->  DATABASE_URL=postgresql+asyncpg://arb:arb@localhost:5432/arb
+#   redis     live sentiment stream  ->  --redis-url redis://localhost:6379/0
+#
+#   docker compose up -d            start both
+#   docker compose down             stop (data stays in the named volume)
+#   docker compose down -v          stop and delete the data
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: arb
+      POSTGRES_PASSWORD: arb
+      POSTGRES_DB: arb
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arb -d arb"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+volumes:
+  pgdata:

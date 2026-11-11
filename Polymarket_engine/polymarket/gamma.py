@@ -50,6 +50,7 @@ def to_toml_section(slug: str, market: dict) -> str:
         f'yes_token = "{tokens["Yes"]}"',
         f'no_token = "{tokens["No"]}"',
         f'tick_size = "{market["orderPriceMinTickSize"]}"',
+        *([f'end_date = "{market["endDate"]}"'] if market.get("endDate") else []),
         "",
         "[polymarket.fees]",
         f'enabled = {str(bool(market.get("feesEnabled"))).lower()}',
