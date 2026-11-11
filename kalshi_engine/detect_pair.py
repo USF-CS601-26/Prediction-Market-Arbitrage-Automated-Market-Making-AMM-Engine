@@ -16,14 +16,26 @@ Polymarket's published formula. After merge this should call
 polymarket.fees.taker_fee directly instead — see NOTE below about
 argument order.
 
+Two modes:
+    one-shot   a single sample, for checking the math
+    --watch    poll both venues on an interval and log a time series,
+               which is how you find out whether a pair actually moves
+               and whether an edge persists or is a momentary artifact
+
 Usage:
-    python detect_pair.py [--size 500] [--pair-config PATH]
+    python detect_pair.py [--size 500]
+    python detect_pair.py --watch --duration 1800 --interval 10 --out run.csv
 """
 
 import argparse
+import csv
 import json
+import sys
+import time
 import tomllib
+import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -109,12 +121,133 @@ def polymarket_fee_fn(fees_cfg: dict):
     return fee
 
 
+def sample(ticker: str, pm: dict, pair_id: str, size: Decimal,
+           k_fee, p_fee) -> tuple[OrderBook, OrderBook, list]:
+    """One synchronized read of both venues plus the resulting edges."""
+    kb = OrderBook(market_id=ticker, exchange="kalshi")
+    kb.apply_snapshot(snapshot_from_rest(ticker, kalshi_orderbook(ticker)))
+    pb = polymarket_book(pm["yes_token"], pm["slug"])
+    return kb, pb, best_edge(pair_id, size, kb, k_fee, pb, p_fee)
+
+
+CSV_COLUMNS = [
+    "ts_utc", "kalshi_bid", "kalshi_ask", "poly_bid", "poly_ask",
+    "size", "buy_venue", "sell_venue", "gross_edge", "fees",
+    "net_edge", "net_per_contract", "executable",
+]
+
+
+def row_for(e, kb: OrderBook, pb: OrderBook) -> dict:
+    kbid, kask = kb.get_top_of_book()
+    pbid, pask = pb.get_top_of_book()
+    return {
+        "ts_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "kalshi_bid": kbid.price if kbid else "", "kalshi_ask": kask.price if kask else "",
+        "poly_bid": pbid.price if pbid else "", "poly_ask": pask.price if pask else "",
+        "size": e.size, "buy_venue": e.buy_venue, "sell_venue": e.sell_venue,
+        "gross_edge": e.gross_edge, "fees": e.total_fees, "net_edge": e.net_edge,
+        "net_per_contract": e.net_per_contract if e.net_per_contract is not None else "",
+        "executable": e.executable,
+    }
+
+
+def watch(ticker, pm, pair_id, size, k_fee, p_fee,
+          duration: float, interval: float, out: str | None):
+    """
+    Polls both venues until `duration` elapses, printing one line per
+    sample and optionally writing a CSV for charting.
+
+    A failed poll is logged and skipped rather than ending the run — a
+    30-minute session should survive a transient network blip, and a
+    gap in the series is far better than losing the whole recording.
+    """
+    writer = None
+    fh = None
+    if out:
+        fh = open(out, "w", newline="")
+        writer = csv.DictWriter(fh, fieldnames=CSV_COLUMNS)
+        writer.writeheader()
+
+    deadline = time.monotonic() + duration
+    rows, errors, n = [], 0, 0
+    print(f"watching for {duration/60:.0f} min, every {interval:.0f}s"
+          f"{f', logging to {out}' if out else ''}\n")
+    print(f"  {'time':<10}{'kalshi':>14}{'polymarket':>14}"
+          f"{'direction':>14}{'net':>11}{'per ct':>9}")
+
+    try:
+        while time.monotonic() < deadline:
+            tick = time.monotonic()
+            try:
+                # one quick retry: a single DNS/TCP blip shouldn't cost a
+                # whole sample on an unattended 30-minute run
+                try:
+                    kb, pb, edges = sample(ticker, pm, pair_id, size, k_fee, p_fee)
+                except (urllib.error.URLError, urllib.error.HTTPError, OSError):
+                    time.sleep(1)
+                    kb, pb, edges = sample(ticker, pm, pair_id, size, k_fee, p_fee)
+                e = edges[0]
+                r = row_for(e, kb, pb)
+                rows.append(r)
+                n += 1
+                if writer:
+                    writer.writerow(r)
+                    fh.flush()      # survive a Ctrl+C mid-run
+                direction = f"{e.buy_venue[:4]}->{e.sell_venue[:4]}"
+                mark = "" if e.executable else " (thin)"
+                per = (f"{e.net_per_contract * 100:+.2f}c"
+                       if e.net_per_contract is not None else "-")
+                kq = f"{r['kalshi_bid']}/{r['kalshi_ask']}"
+                pq = f"{r['poly_bid']}/{r['poly_ask']}"
+                print(f"  {r['ts_utc'][11:19]:<10}{kq:>14}{pq:>14}"
+                      f"{direction:>14}{e.net_edge:>+11.4f}{per:>9}{mark}")
+            except (urllib.error.URLError, urllib.error.HTTPError, OSError) as err:
+                errors += 1
+                print(f"  poll failed ({type(err).__name__}: {err}) — continuing")
+
+            slack = interval - (time.monotonic() - tick)
+            if slack > 0:
+                time.sleep(min(slack, max(0.0, deadline - time.monotonic())))
+    except KeyboardInterrupt:
+        print("\n  stopped early")
+    finally:
+        if fh:
+            fh.close()
+
+    if not rows:
+        print("\nno successful samples")
+        return
+
+    nets = [Decimal(str(r["net_edge"])) for r in rows]
+    execs = sum(1 for r in rows if r["executable"])
+    positive = sum(1 for v in nets if v > 0)
+    moved = len({(r["kalshi_bid"], r["kalshi_ask"], r["poly_bid"], r["poly_ask"])
+                 for r in rows})
+    print(f"\n  {n} samples ({errors} failed)")
+    print(f"  net edge   min {min(nets):+.4f}   max {max(nets):+.4f}   "
+          f"mean {sum(nets)/len(nets):+.4f}")
+    print(f"  positive   {positive}/{n} samples")
+    print(f"  executable {execs}/{n} samples at size {size}")
+    print(f"  distinct top-of-book states seen: {moved}"
+          + ("   <- pair never moved; a longer window or a busier pair "
+             "would make a better fixture" if moved <= 1 else ""))
+    if out:
+        print(f"  wrote {out}")
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--size", type=Decimal, default=Decimal("100"))
     p.add_argument("--pair-config")
     p.add_argument("--kalshi-ticker",
                    help="overrides [kalshi].ticker, which is still a TODO in pair.toml")
+    p.add_argument("--watch", action="store_true",
+                   help="poll repeatedly instead of sampling once")
+    p.add_argument("--duration", type=float, default=1800,
+                   help="seconds to watch (default 1800 = 30 min)")
+    p.add_argument("--interval", type=float, default=10,
+                   help="seconds between polls (default 10)")
+    p.add_argument("--out", help="write a CSV time series to this path")
     a = p.parse_args()
 
     cfg = load_pair(a.pair_config)
@@ -129,10 +262,6 @@ if __name__ == "__main__":
     verified = cfg.get("verification", {}).get("criteria_match", False)
     pm = cfg["polymarket"]
 
-    kb = OrderBook(market_id=ticker, exchange="kalshi")
-    kb.apply_snapshot(snapshot_from_rest(ticker, kalshi_orderbook(ticker)))
-    pb = polymarket_book(pm["yes_token"], pm["slug"])
-
     sched = fetch_fee_schedule(ticker)
     k_fee = lambda c, pr: kalshi_taker_fee(c, pr, sched)
     p_fee = polymarket_fee_fn(pm.get("fees", {}))
@@ -141,12 +270,18 @@ if __name__ == "__main__":
     if not verified:
         print("  WARNING: verification.criteria_match is false — this pair has not "
               "been manually confirmed equivalent. Numbers below are indicative only.")
-    for book, fees in ((kb, f"{sched.fee_type} x{sched.multiplier}"),
-                       (pb, "enabled" if pm.get("fees", {}).get("enabled") else "fee-free")):
-        b, s = book.get_top_of_book()
-        print(f"  {book.exchange:<11} {len(book.bids):>3}b/{len(book.asks):<3}a  "
-              f"bid {b.price} x {b.size:<10} ask {s.price} x {s.size:<10}  fees: {fees}")
 
-    print(f"\nsize {a.size}:")
-    for e in best_edge(pair_id, a.size, kb, k_fee, pb, p_fee):
-        print(describe(e))
+    if a.watch:
+        watch(ticker, pm, pair_id, a.size, k_fee, p_fee,
+              a.duration, a.interval, a.out)
+    else:
+        kb, pb, edges = sample(ticker, pm, pair_id, a.size, k_fee, p_fee)
+        for book, fees in ((kb, f"{sched.fee_type} x{sched.multiplier}"),
+                           (pb, "enabled" if pm.get("fees", {}).get("enabled")
+                            else "fee-free")):
+            b, s2 = book.get_top_of_book()
+            print(f"  {book.exchange:<11} {len(book.bids):>3}b/{len(book.asks):<3}a  "
+                  f"bid {b.price} x {b.size:<10} ask {s2.price} x {s2.size:<10}  fees: {fees}")
+        print(f"\nsize {a.size}:")
+        for e in edges:
+            print(describe(e))
