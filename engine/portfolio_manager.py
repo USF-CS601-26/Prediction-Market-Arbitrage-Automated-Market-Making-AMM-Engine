@@ -5,15 +5,15 @@ PortfolioManager — the one book of positions every strategy and every venue
 shares, and the risk gate every order passes through.
 
 It implements the RiskManager contract in engine/portfolio.py
-(check_order / record_fill) and adds get_inventory, which the AMM skews its
-quotes on. SimplePortfolioManager in that file stays as the reference
+(check_order / record_fill) and adds get_inventory: YES/NO inventory, average
+cost and P&L per market. SimplePortfolioManager in that file stays as the reference
 implementation the arbitrage unit tests were written against; the pipeline
 runs on this one.
 
 Why a singleton
 ---------------
-Position state is a process-wide fact. If the arbitrage strategy and the AMM
-each held their own PortfolioManager, each would see room under the limits
+Position state is a process-wide fact. If two strategies (anything registered
+through pipeline.add_strategy) each held their own PortfolioManager, each would see room under the limits
 that the other had already used, and together they would over-allocate.
 `PortfolioManager()` therefore always returns the same instance; the
 creation is lock-protected (double-checked in __new__) so two threads racing
@@ -34,8 +34,8 @@ approved BUY reserves the capacity it could consume (its size at its limit
 price) until it fills, is released, or is found to be no longer open by
 reconcile_reservations(). The next check_order — from any strategy, for any
 venue — sees that reservation as if it had already filled. That is what
-stops the AMM quoting into room the arbitrage strategy is about to use, and
-what stops two venues each being approved against the same total limit.
+stops one strategy trading into room another is about to use, and what stops
+two venues each being approved against the same total limit.
 
 Exposure is worst-case loss, not notional
 -----------------------------------------
@@ -46,8 +46,8 @@ can lose is
     exposure = max(0, C - min(Y, N))
 
 A plain long position's exposure is its cost; buying the other outcome
-against it REDUCES exposure (a YES+NO pair is a certain $1), which is exactly
-how an AMM flattens. Short positions are converted to their long equivalent
+against it REDUCES exposure (a YES+NO pair is a certain $1), so a hedging
+order is recognized as one. Short positions are converted to their long equivalent
 first (short q YES at p == long q NO at 1 - p). Positions on DIFFERENT venues
 are not netted against each other: a Kalshi NO and a Polymarket YES on the
 same event settle on different rails at different times, so the conservative
@@ -482,8 +482,8 @@ class PortfolioManager:
 
         Pending orders count only when they push the SAME way as this one.
         A resting order on the other side might never fill, so letting it
-        offset this order would understate the worst case — an AMM's own bid
-        must not make its ask look like a hedge.
+        offset this order would understate the worst case — a strategy's own
+        resting YES bid must not make its NO bid look like a hedge.
         """
         lim = self.limits
         problem = self._order_problem(order, size)

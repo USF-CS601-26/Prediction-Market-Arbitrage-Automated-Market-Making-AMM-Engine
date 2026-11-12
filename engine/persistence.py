@@ -40,8 +40,8 @@ class EventSink(Protocol):
 
     The first three calls are the arbitrage events this file was written
     for. The rest were added with feature 6 (engine/db/sink.py): the
-    TradeLog's order rows, book snapshots, spread history, sentiment features
-    and AMM quotes. Every call is synchronous and must not block — a sink
+    TradeLog's order rows, book snapshots, spread history and sentiment
+    features. Every call is synchronous and must not block — a sink
     that talks to a server queues the row and writes it from its own task.
     A sink that has nowhere to put one of these simply ignores it.
     """
@@ -63,8 +63,6 @@ class EventSink(Protocol):
     def record_sentiment(self, ts, pair_id: str, level, volatility, confidence,
                          n_points: int, latest=None, threshold=None) -> None: ...
 
-    def record_amm_quote(self, quote) -> None: ...
-
     def close(self) -> None: ...
 
 
@@ -83,9 +81,6 @@ class _IgnoresFeature6Events:
 
     def record_sentiment(self, ts, pair_id, level, volatility, confidence, n_points,
                          latest=None, threshold=None) -> None:
-        pass
-
-    def record_amm_quote(self, quote) -> None:
         pass
 
 
@@ -175,7 +170,7 @@ class SqliteEventSink(_IgnoresFeature6Events):
     Pass ":memory:" for a throwaway database, which is what the tests use.
 
     Arbitrage events only. For the full feature-6 schema (trade log, book
-    snapshots, spread history, sentiment features, AMM quotes) use
+    snapshots, spread history, sentiment features) use
     engine.db.sink.AsyncDbEventSink, which also runs on SQLite via
     `sqlite+aiosqlite:///file.db`.
     """

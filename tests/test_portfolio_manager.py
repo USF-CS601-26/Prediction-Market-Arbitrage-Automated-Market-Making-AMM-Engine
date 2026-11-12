@@ -246,9 +246,9 @@ def test_a_fill_consumes_its_reservation_instead_of_counting_twice():
 
 def test_a_resting_order_on_one_side_does_not_make_the_other_side_look_hedged():
     """
-    An AMM bids 100 YES and offers by bidding NO. Either can fill without the
-    other, so the NO order is judged as if the YES bid never fills: 200 NO
-    would leave net -200 against a 100 limit.
+    A strategy rests a bid for 100 YES and another for NO. Either can fill
+    without the other, so the NO order is judged as if the YES bid never
+    fills: 200 NO would leave net -200 against a 100 limit.
     """
     m = pm(max_position_per_market=100)
     assert m.check_order(order(outcome="YES", size="100", price="0.48")).max_size is None

@@ -177,9 +177,6 @@ class AsyncDbEventSink:
         self._put("sentiment_features", rows.sentiment_row(
             self.run_id, ts, pair_id, level, volatility, confidence, n_points, latest, threshold))
 
-    def record_amm_quote(self, quote) -> None:
-        self._put("amm_quotes", rows.amm_quote_row(self.run_id, quote))
-
     def _put(self, table: str, row: dict) -> None:
         if self._closed:
             self.dropped += 1
