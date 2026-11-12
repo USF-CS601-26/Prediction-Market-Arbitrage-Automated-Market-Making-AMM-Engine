@@ -239,6 +239,33 @@ TEST_DATABASE_URL=postgresql+asyncpg://arb:arb@localhost:5432/arb python -m pyte
 - Modified AI code where it didn't fit: I changed `taker_fee` to `(shares, price, fees)`
   to match the Kalshi fee functions. 
 
+#### Milestone 2 (market making, risk and persistence)
+
+**Main types of tasks**
+- **Code review:** checking Joshua's Milestone 2 PR against our task split to see
+  which of my parts were still open.
+- **Implementation:** `PortfolioManager`, `AMMStrategy` and the `engine/db/`
+  persistence package, wired into `engine/pipeline.py`.
+- **Generating tests and docs:** 71 tests, and `docs/MARKET_MAKING_RISK_PERSISTENCE.md`.
+
+**Examples of substantial AI-assisted parts**
+1. **PortfolioManager:** the AI drafted the thread-safe singleton, the position and
+   P&L accounting, and the order reservations that stop two strategies or two venues
+   from being approved against the same limit.
+2. **AMMStrategy:** the AI drafted the reservation-price and spread formulas and the
+   quote logic (tick-aligned, clamped to 0.01–0.99, cancel-and-replace on a threshold).
+3. **Feature 6:** the AI drafted one schema that runs on PostgreSQL and on SQLite (for
+   tests), with background batch writes so logging never blocks trading.
+
+**How I reviewed, tested and modified the code**
+- **Made the scope decisions myself:** I did feature 6 before feature 3, and kept
+  Joshua's sentiment format (`sentiment:{pair_id}`, no confidence field) instead of
+  changing his code, so the AMM derives confidence from the recent headlines.
+- **Tested on our recorded tapes, not only on fixtures:** running the full pipeline
+  caught two bugs the unit tests missed. The AMM was leaning to unwind the arbitrage strategy's hedged position, and
+  the risk check treated the AMM's own resting bid as a hedge. Both are fixed and tested.
+- **Kept Joshua's work passing:** all 123 of his tests still pass with the new code.
+
 ### Joshua:
 **Main types of tasks**
 - **Debugging against the live API:** diagnosing a 401 that blocked all Kalshi
