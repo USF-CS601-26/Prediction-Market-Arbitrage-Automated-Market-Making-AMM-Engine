@@ -258,8 +258,12 @@ check_order(order) -> RiskDecision     # before dispatch, every order
 record_fill(fill)  -> None             # after every fill
 ```
 
-Person A owns the real `PortfolioManager`; `SimplePortfolioManager` is a
-working reference implementation so the pipeline runs end to end today.
+The pipeline runs on `PortfolioManager` (`engine/portfolio_manager.py`): a
+thread-safe singleton shared by every strategy, with per-market, per-venue and
+total limits and reservations that block over-allocation across exchanges —
+see [MARKET_MAKING_RISK_PERSISTENCE.md](MARKET_MAKING_RISK_PERSISTENCE.md).
+`SimplePortfolioManager` remains the reference implementation the arbitrage
+unit tests use.
 `check_order` may be sync or async — the strategy awaits an awaitable result —
 so it can grow a database call without the strategy changing.
 
@@ -321,6 +325,13 @@ rewrite of that one file.
 Decimals are stored as `TEXT`, not `REAL`. A float column would silently undo
 the entire reason `models.py` uses `Decimal`.
 
+Feature 6 itself is `engine/db/`: `AsyncDbEventSink` on PostgreSQL through
+SQLAlchemy's async engine and asyncpg (`--db-url`). It adds the trade log, book
+snapshots, spread history, sentiment features and AMM quotes, keeps these
+tables' columns, and stores Decimals as exact `NUMERIC`. Recording is a
+non-blocking enqueue; a background task writes in batches. Schema and design:
+[MARKET_MAKING_RISK_PERSISTENCE.md](MARKET_MAKING_RISK_PERSISTENCE.md).
+
 ---
 
 ## The pipeline, and the seam for the AMM
@@ -341,9 +352,16 @@ at a stated frame index rather than whenever a news API felt like it.
 The strategy list is open. `ArbitrageStrategy` is registered by default;
 anything implementing `BaseStrategy` registers through `add_strategy()` and
 gets the same tick, the same `OrderExecutorFactory`, the same
-`PortfolioManager` and the same sentiment feed. **This is the seam Person A's
-AMM quoter plugs into** — `test_a_high_sentiment_headline_skews_a_registered_quoting_strategy`
-drives a minimal stand-in through it to prove the contract holds.
+`PortfolioManager` and the same sentiment feed. **This is the seam the AMM
+quoter plugs into**: `--amm kalshi` / `--amm polymarket` registers an
+`AMMStrategy` per venue. `test_a_high_sentiment_headline_skews_a_registered_quoting_strategy`
+proves the contract with a minimal stand-in, and `tests/test_amm_pipeline.py`
+runs the real AMM through it on the tapes.
+
+On each book change the mock venues first re-match resting orders
+(`SimulatedExecutor.match_resting`), so an AMM quote fills when the book trades
+through it. After the strategies run, the pipeline releases risk reservations
+held by orders that are no longer open.
 
 `on_tick` is called after any book change, not on a fixed schedule, so a
 strategy must be cheap when there is nothing to do and must not assume a

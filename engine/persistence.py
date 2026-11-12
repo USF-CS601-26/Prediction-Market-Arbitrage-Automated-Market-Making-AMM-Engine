@@ -4,10 +4,10 @@ engine/persistence.py
 Where arbitrage events and fills go so they can be looked at afterwards.
 
 Scope note: Feature 6 in the README is "Event & Snapshot Persistence:
-PostgreSQL integration via SQLAlchemy/asyncpg". This module is NOT that. It
-is the sink interface that feature plugs into, plus a SQLite implementation
-so the pipeline has a real, queryable database today without adding a
-service dependency to a course project.
+PostgreSQL integration via SQLAlchemy/asyncpg". That is engine/db/
+(AsyncDbEventSink, selected with --db-url). This module is the sink interface
+it implements, plus the original events-only SQLite sink (--db), which needs
+no extra dependency.
 
 SQLite rather than JSON lines because the questions worth asking afterwards
 are aggregate ones — how often did an edge exist, what did the threshold
@@ -35,7 +35,16 @@ log = logging.getLogger(__name__)
 
 
 class EventSink(Protocol):
-    """What the pipeline needs from a persistence layer."""
+    """
+    What the pipeline needs from a persistence layer.
+
+    The first three calls are the arbitrage events this file was written
+    for. The rest were added with feature 6 (engine/db/sink.py): the
+    TradeLog's order rows, book snapshots, spread history, sentiment features
+    and AMM quotes. Every call is synchronous and must not block — a sink
+    that talks to a server queues the row and writes it from its own task.
+    A sink that has nowhere to put one of these simply ignores it.
+    """
 
     def record_opportunity(self, opportunity, threshold: Decimal, volatility: Decimal) -> None: ...
 
@@ -43,10 +52,44 @@ class EventSink(Protocol):
 
     def record_fill(self, fill) -> None: ...
 
+    def record_order(self, state, ts=None) -> None: ...
+
+    def record_book_snapshot(self, ts, venue: str, market_id: str, outcome: str,
+                             book, reason: str = "periodic") -> None: ...
+
+    def record_spread(self, ts, pair_id: str, quotes: dict, opportunities,
+                      threshold=None, volatility=None) -> None: ...
+
+    def record_sentiment(self, ts, pair_id: str, level, volatility, confidence,
+                         n_points: int, latest=None, threshold=None) -> None: ...
+
+    def record_amm_quote(self, quote) -> None: ...
+
     def close(self) -> None: ...
 
 
-class NullEventSink:
+class _IgnoresFeature6Events:
+    """No-op versions of the calls added with feature 6."""
+
+    def record_order(self, state, ts=None) -> None:
+        pass
+
+    def record_book_snapshot(self, ts, venue, market_id, outcome, book, reason="periodic") -> None:
+        pass
+
+    def record_spread(self, ts, pair_id, quotes, opportunities, threshold=None,
+                      volatility=None) -> None:
+        pass
+
+    def record_sentiment(self, ts, pair_id, level, volatility, confidence, n_points,
+                         latest=None, threshold=None) -> None:
+        pass
+
+    def record_amm_quote(self, quote) -> None:
+        pass
+
+
+class NullEventSink(_IgnoresFeature6Events):
     """Records nothing. The default, so no test needs a database on disk."""
 
     def record_opportunity(self, opportunity, threshold=None, volatility=None) -> None:
@@ -124,12 +167,17 @@ def _t(value) -> str | None:
     return str(value)
 
 
-class SqliteEventSink:
+class SqliteEventSink(_IgnoresFeature6Events):
     """
     Usage:
         with SqliteEventSink("arb.db") as sink:
             ...
     Pass ":memory:" for a throwaway database, which is what the tests use.
+
+    Arbitrage events only. For the full feature-6 schema (trade log, book
+    snapshots, spread history, sentiment features, AMM quotes) use
+    engine.db.sink.AsyncDbEventSink, which also runs on SQLite via
+    `sqlite+aiosqlite:///file.db`.
     """
 
     def __init__(self, path: str | Path = "arb_events.db"):
@@ -200,6 +248,20 @@ class SqliteEventSink:
 
     def __exit__(self, *exc):
         self.close()
+
+
+def make_sink(db_path: str | None = None, db_url: str | None = None, **kwargs) -> EventSink:
+    """
+    --db-url (an SQLAlchemy async URL, normally postgresql+asyncpg://...)
+    wins over --db (a SQLite file for the events-only sink); neither means
+    NullEventSink.
+    """
+    if db_url:
+        from engine.db.sink import AsyncDbEventSink    # noqa: PLC0415  (SQLAlchemy is optional)
+        return AsyncDbEventSink(db_url, **kwargs)
+    if db_path:
+        return SqliteEventSink(db_path)
+    return NullEventSink()
 
 
 def dump_json(obj) -> str:

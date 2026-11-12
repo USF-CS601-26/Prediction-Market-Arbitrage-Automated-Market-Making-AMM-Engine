@@ -9,6 +9,9 @@ condition_id = "0xd1796c09d0d6f876f8580086ae9808ec991784e3a74b25a1830a25de71a78c
 yes_token = "114694726451307654528948558967898493662917070661203465131156925998487819889437"
 no_token = "66255671088804707681511323064315150986307471908131081808279119719218775249892"
 tick_size = "0.01"
+# end of the resolution window in the rule note below: 2026-12-31 ET = 2027-01-01 05:00 UTC.
+# Confirm against Gamma's endDate (python -m polymarket.gamma <slug> prints it).
+end_date = "2027-01-01T05:00:00Z"
 
 [polymarket.fees]
 enabled = false   # Gamma feesEnabled = false (checked 2026-10-04); geopolitics markets are fee-free

@@ -10,6 +10,7 @@ straight into Decimal and never pass through float.
 """
 
 import tomllib
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
@@ -36,6 +37,9 @@ class PolymarketMarketConfig(BaseModel):
     no_token: str
     tick_size: Decimal
     fees: FeeSchedule           # required on purpose: a missing fee config must not silently mean "free"
+    # when the market stops trading (Gamma endDate). The AMM uses it for T - t
+    # and stops quoting shortly before; optional so older pair files still load
+    end_date: datetime | None = None
 
 
 class KalshiMarketConfig(BaseModel):
