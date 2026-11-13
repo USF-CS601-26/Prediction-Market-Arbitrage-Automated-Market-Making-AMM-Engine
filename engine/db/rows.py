@@ -129,20 +129,6 @@ def sentiment_row(run_id: str, ts: datetime, pair_id: str, level: Decimal,
     }
 
 
-# ---- amm_quotes ----
-
-def amm_quote_row(run_id: str, quote) -> dict:
-    return {
-        "run_id": run_id, "ts": utc(quote.timestamp), "strategy_id": quote.strategy_id,
-        "venue": quote.venue, "market": quote.market, "action": quote.action,
-        "mid": quote.mid, "reservation": quote.reservation, "spread": quote.spread,
-        "bid": quote.bid, "ask": quote.ask, "inventory": quote.inventory,
-        "sigma": quote.sigma, "tau_days": quote.tau_days, "sentiment": quote.sentiment,
-        "confidence": quote.confidence, "orders_placed": len(quote.placed),
-        "orders_cancelled": len(quote.cancelled), "reason": quote.reason,
-    }
-
-
 # ---- arbitrage ----
 
 def opportunity_row(run_id: str, opportunity, threshold: Decimal | None,

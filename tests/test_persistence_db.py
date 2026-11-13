@@ -20,7 +20,6 @@ from decimal import Decimal
 
 import pytest
 
-from engine.amm_strategy import AMMQuote
 from engine.arbitrage import ArbitrageOpportunity, kalshi_quotes
 from engine.db import rows
 from engine.db.schema import EVENT_TABLES
@@ -46,7 +45,7 @@ def a_fill(i=0, price=EXACT):
 def an_order_state():
     order = Order(order_id="o-1", venue="polymarket", market_id="tok", outcome="NO",
                   side=OrderSide.BUY, size=D(20), limit_price=D("0.62"), pair_id="P",
-                  strategy_id="amm:polymarket:P")
+                  strategy_id="arb:P")
     state = OrderState(order=order, status=OrderStatus.PARTIALLY_FILLED,
                        filled_size=D(5), fees=D(0), updated_at=TS)
     state.fills.append(Fill(order_id="o-1", venue="polymarket", market_id="tok", outcome="NO",
@@ -60,13 +59,6 @@ def an_opportunity():
                                 size=D(100), yes_avg_price=D("0.38"), no_avg_price=D("0.59"),
                                 gross_cost=D("97"), fees=D("1.80"), net_profit=D("1.20"),
                                 top_of_book_cost=D("0.97"))
-
-
-def a_quote():
-    return AMMQuote(strategy_id="amm:kalshi:P", timestamp=TS, venue="kalshi", market="P",
-                    mid=D("0.415"), reservation=D("0.433"), spread=D("0.0206"),
-                    bid=D("0.42"), ask=D("0.45"), sigma=D("0.02"), tau_days=D(1),
-                    sentiment=D("0.9"), confidence=D(1), action="requote", reason="test")
 
 
 @pytest.fixture
@@ -87,7 +79,6 @@ async def record_one_of_each(sink):
                           SentimentSnapshot(pair_id="P", score=D("0.9"), timestamp=TS,
                                             headline="expected to step down", source="wire"),
                           D("0.005"))
-    sink.record_amm_quote(a_quote())
 
 
 # --------------------------------------------------------------------------
@@ -103,7 +94,6 @@ async def test_every_row_builder_fills_every_column_of_its_table():
         "spread_history": [rows.spread_row("r", TS, "P", {"kalshi": kalshi_quotes("KX", book)},
                                            [], None, None)],
         "sentiment_features": [rows.sentiment_row("r", TS, "P", D(0), D(0), D(0), 0)],
-        "amm_quotes": [rows.amm_quote_row("r", a_quote())],
     }
     for table, built_rows in built.items():
         columns = {c.name for c in EVENT_TABLES[table].columns} - {"id"}
@@ -135,8 +125,8 @@ async def test_every_event_type_lands_in_its_table(url):
     await sink.aclose()
 
     assert sink.counts() == {"trade_log": 2, "market_snapshots": 1, "spread_history": 1,
-                             "sentiment_features": 1, "amm_quotes": 1,
-                             "arb_opportunities": 1, "arb_attempts": 0}
+                             "sentiment_features": 1, "arb_opportunities": 1,
+                             "arb_attempts": 0}
     assert sink.dropped == 0
 
     reader = AsyncDbEventSink(url)          # a fresh engine (and run) on the same file
@@ -172,12 +162,10 @@ async def test_snapshot_and_sentiment_rows_read_back_intact(url):
     (snap,) = await sink.fetch_table("market_snapshots")
     (senti,) = await sink.fetch_table("sentiment_features")
     (spread,) = await sink.fetch_table("spread_history")
-    (quote,) = await sink.fetch_table("amm_quotes")
     await sink.aclose()
     assert snap["asks"] == [["0.42", "200"], ["0.43", "50"]]
     assert senti["latest_headline"] == "expected to step down" and senti["level"] == D("0.9")
     assert spread["tops"]["kalshi"]["yes_ask"] == "0.42"
-    assert quote["reservation"] == D("0.433") and quote["action"] == "requote"
 
 
 async def test_rows_recorded_before_start_are_written_once_it_starts(url):

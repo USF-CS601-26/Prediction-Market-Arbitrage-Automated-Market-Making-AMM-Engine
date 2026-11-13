@@ -198,9 +198,7 @@ class SimulatedExecutor(BaseExecutor):
             ladder = bid_ladder(book, order.limit_price)
             side_map = book.bids
 
-        # the REMAINING size, so a resting order re-matched by match_resting()
-        # can never fill past its original size
-        target = self._fill_target(state.remaining)
+        target = self._fill_target(order.size)
         filled = ZERO
         for price, available in ladder:
             if filled >= target:
@@ -289,31 +287,3 @@ class SimulatedExecutor(BaseExecutor):
     def open_orders(self) -> list[OrderState]:
         """Every order still live at this venue. Used by the unwind path."""
         return [s for s in self._orders.values() if not s.status.is_terminal]
-
-    async def match_resting(self) -> int:
-        """
-        Re-match every resting order against the CURRENT book; returns how
-        many orders received a fill.
-
-        Without this a resting limit order could only ever fill at the moment
-        it was submitted, which is fine for the arbitrage legs (whatever does
-        not fill immediately is cancelled) but makes a market maker's quotes —
-        which are resting orders by design — fill never. The model is the
-        usual "trade-through" one for L2 data: a resting BUY at p fills once
-        the book offers at or below p, a resting SELL once it bids at or above
-        p, honouring the limit price level by level exactly as submit_order
-        does. The pipeline calls this on every book change, before the
-        strategies tick, the way a venue's matching engine runs before anyone
-        reacts to the new prices.
-        """
-        touched = 0
-        for state in self.open_orders():
-            if state.status == OrderStatus.PENDING:
-                continue                     # still in flight; submit_order owns it
-            if self.book_for(state.order) is None:
-                continue
-            before = state.filled_size
-            await self._fill(state)
-            if state.filled_size > before:
-                touched += 1
-        return touched

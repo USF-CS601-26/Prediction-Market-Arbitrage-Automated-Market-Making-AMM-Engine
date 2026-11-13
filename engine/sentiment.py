@@ -251,3 +251,25 @@ class RedisSentimentFeed(RollingSentiment):
         except Exception:
             log.warning("dropping malformed sentiment entry on %s: %r", pair_id, fields)
             return None
+
+
+def sentiment_features(feed, pair_id: str, min_points: int = 1) -> tuple[Decimal, Decimal, int]:
+    """
+    (level, confidence, points in the window) for the sentiment_features table.
+
+    The stream carries no confidence field, so it is derived from the window:
+    agreement (1 - stdev of the scores, which lie in [-1, 1]) times evidence
+    (min(1, n / min_points)). Headlines that agree score high; contradictory
+    ones average to a small level and also score low agreement.
+    """
+    if feed is None:
+        return ZERO, ZERO, 0
+    recent = feed.recent(pair_id) if hasattr(feed, "recent") else []
+    scores = [float(p.score) for p in recent]
+    if not scores:
+        return ZERO, ZERO, 0
+    level = statistics.fmean(scores)
+    agreement = max(0.0, 1.0 - statistics.pstdev(scores))
+    evidence = min(1.0, len(scores) / max(min_points, 1))
+    return (Decimal(repr(round(level, 10))), Decimal(repr(round(agreement * evidence, 10))),
+            len(scores))

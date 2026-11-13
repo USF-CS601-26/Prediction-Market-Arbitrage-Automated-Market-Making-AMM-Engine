@@ -29,7 +29,6 @@ Tables
     market_snapshots    L2 book snapshots, top N levels per side — the MarketSnapshot
     spread_history      cross-venue top of book and the best priced edge over time
     sentiment_features  sentiment level, volatility, confidence and headline over time
-    amm_quotes          every AMM reprice: reservation price, spread, quotes, inputs
     arb_opportunities   priced arbitrage opportunities (same columns as the SQLite sink)
     arb_attempts        what each execution attempt actually did
 """
@@ -176,29 +175,6 @@ sentiment_features = Table(
     Column("threshold", ExactDecimal),                    # dP_min this produced
 )
 
-amm_quotes = Table(
-    "amm_quotes", metadata,
-    _id(), _run_id(),
-    Column("ts", UTCDateTime, nullable=False),
-    Column("strategy_id", String(64), nullable=False),
-    Column("venue", String(32), nullable=False),
-    Column("market", String(128), nullable=False),
-    Column("action", String(16), nullable=False),         # requote | cancel | stop
-    Column("mid", ExactDecimal),
-    Column("reservation", ExactDecimal),
-    Column("spread", ExactDecimal),
-    Column("bid", ExactDecimal),
-    Column("ask", ExactDecimal),
-    Column("inventory", ExactDecimal),
-    Column("sigma", ExactDecimal),
-    Column("tau_days", ExactDecimal),
-    Column("sentiment", ExactDecimal),
-    Column("confidence", ExactDecimal),
-    Column("orders_placed", Integer, nullable=False),
-    Column("orders_cancelled", Integer, nullable=False),
-    Column("reason", Text),
-)
-
 arb_opportunities = Table(
     "arb_opportunities", metadata,
     _id(), _run_id(),
@@ -234,10 +210,9 @@ arb_attempts = Table(
 
 # time-ordered reads per run are the common query on every event table
 for _table in (trade_log, market_snapshots, spread_history, sentiment_features,
-               amm_quotes, arb_opportunities, arb_attempts):
+               arb_opportunities, arb_attempts):
     Index(f"ix_{_table.name}_run_ts", _table.c.run_id, _table.c.ts)
 Index("ix_trade_log_order", trade_log.c.order_id)
 
 EVENT_TABLES = {t.name: t for t in (trade_log, market_snapshots, spread_history,
-                                     sentiment_features, amm_quotes,
-                                     arb_opportunities, arb_attempts)}
+                                     sentiment_features, arb_opportunities, arb_attempts)}

@@ -27,7 +27,7 @@ Milestone 2 adds the trading side on top of that ingestion layer:
 10. **End-to-end pipeline:** both feeds, sentiment, strategies, mock execution and a
     SQLite event log, runnable live or as a repeatable replay over recorded tapes.
 
-Market making, risk and persistence:
+Risk and persistence:
 
 11. **PortfolioManager** (`engine/portfolio_manager.py`): a thread-safe singleton
     holding one book of positions for every strategy and venue — YES/NO inventory,
@@ -35,19 +35,13 @@ Market making, risk and persistence:
     and `get_inventory`. Limits per market, per venue and in total, with
     reservations so two strategies or two venues can never be approved against the
     same room.
-12. **AMMStrategy** (`engine/amm_strategy.py`): Avellaneda-Stoikov quotes,
-    `r = s − q·γ·σ²·(T−t) + k·S·confidence` and
-    `δ = γσ²(T−t) + (2/γ)·ln(1+γ/κ)`, skewed by inventory and by the shared
-    sentiment feed, clamped to 0.01–0.99 on the tick grid, cancelled and replaced
-    only when the reservation price moves, and stopped near expiry or when the risk
-    limits are hit.
-13. **Feature 6, persistence** (`engine/db/`): PostgreSQL via SQLAlchemy's async
+12. **Feature 6, persistence** (`engine/db/`): PostgreSQL via SQLAlchemy's async
     engine and asyncpg. The tables are a trade log, book snapshots, spread history,
-    sentiment features, AMM quotes and the arbitrage events. Writes are batched in
-    the background, so logging never blocks the strategy loop.
+    sentiment features and the arbitrage events. Writes are batched in the
+    background, so logging never blocks the strategy loop.
 
-See **[docs/MARKET_MAKING_RISK_PERSISTENCE.md](docs/MARKET_MAKING_RISK_PERSISTENCE.md)**
-for the AMM maths, the risk limits and the database schema.
+See **[docs/RISK_AND_PERSISTENCE.md](docs/RISK_AND_PERSISTENCE.md)** for the risk
+limits and the database schema.
 
 ## Architecture
 
@@ -60,7 +54,7 @@ The short version — three layers, with market data flowing up and orders flowi
 |---|---|
 | `kalshi_engine/` | Kalshi WebSocket feed, L2 book, quadratic fee schedule, depth-walking spread engine |
 | `Polymarket_engine/` | Polymarket CLOB feed, one L2 book per outcome token, fee schedule |
-| `engine/` | Venue-neutral trading layer: executors, arbitrage strategy, AMM, PortfolioManager, sentiment, persistence (`engine/db/`), pipeline |
+| `engine/` | Venue-neutral trading layer: executors, arbitrage strategy, PortfolioManager, sentiment, persistence (`engine/db/`), pipeline |
 
 `kalshi_engine/models.py` holds the shared **market data** contracts;
 `engine/models.py` holds the **order** contracts. The ingestion engines have no
@@ -133,10 +127,9 @@ python -m engine.pipeline --replay <PM_TAPE> <KS_TAPE> --kalshi-fee-multiplier 1
   --headline "800:0.95:Netanyahu to resign - wire" \
   --headline "805:-0.90:Office denies resignation"
 
-# add AMM quoters on both venues and log everything to PostgreSQL
+# log every event family and book snapshots to PostgreSQL (feature 6)
 docker compose up -d postgres
 python -m engine.pipeline --replay <PM_TAPE> <KS_TAPE> --kalshi-fee-multiplier 1 \
-  --amm kalshi --amm polymarket \
   --headline "1200:0.90:Netanyahu expected to step down" \
   --db-url postgresql+asyncpg://arb:arb@localhost:5432/arb
 
@@ -153,8 +146,6 @@ python -m engine.pipeline --live --max-seconds 60 --db-url postgresql+asyncpg://
 | `--kalshi-fee-multiplier M` | Skip the fee-schedule lookup, making a replay network-free. Use `1` for the recorded tapes. |
 | `--base-threshold D` / `--lam L` | `ΔP_min = base + λ · sentiment_volatility` (defaults 0.005 and 0.05) |
 | `--headline FRAMES:SCORE:TEXT` | Replay only: inject a scored headline after N frames. Repeatable. |
-| `--amm VENUE` | Run an AMM quoter on `kalshi` or `polymarket` (repeatable) |
-| `--amm-gamma G` / `--amm-kappa K` / `--amm-k K` / `--amm-size N` | AMM risk aversion, order-arrival decay, sentiment drift, quote size (defaults 2, 100, 0.02, 10) |
 | `--db-url URL` | Feature 6: write every event family to this SQLAlchemy async URL (default `$DATABASE_URL`) |
 | `--db PATH` | Older events-only sink: opportunities, attempts and fills to a SQLite file |
 | `--redis-url URL` | Live only: consume sentiment from the `sentiment:{pair_id}` stream |
@@ -173,7 +164,6 @@ What the report tells you:
 | `locked profit` | $1.00 per matched pair minus everything actually paid, unwinds included |
 | `naked after unwind` | Excess that could **not** be flattened. Should be 0; anything else needs a look. |
 | `persisted` | Rows written per table; `(N dropped)` appears only if the database fell behind or failed |
-| `AMM` | Per quoter: requotes, cancels, risk vetoes, and the last quote with its mid and inventory |
 
 > The pipeline prints a warning on every run because
 > `Polymarket_engine/config/pair.toml` still has `criteria_match = false`. Until both
@@ -183,8 +173,8 @@ What the report tells you:
 
 ```bash
 # cross-venue suite: executors, arbitrage math, strategy, replay integration
-python -m pytest tests                  # 194 tests (1 skipped without PostgreSQL), ~2.5 min; the replays dominate
-python -m pytest tests -m "not slow"    # 172 tests, ~10s, no tape replays
+python -m pytest tests                  # 168 tests (1 skipped without PostgreSQL), ~3 min; the replays dominate
+python -m pytest tests -m "not slow"    # 145 tests, ~10s, no tape replays
 
 # the per-venue suites, run from their own folders
 cd kalshi_engine     && python -m pytest tests   # 33 tests; reaches the live Kalshi API
@@ -200,9 +190,8 @@ cd Polymarket_engine && python -m pytest tests
 | `tests/test_pipeline_replay.py` | The whole stack over the recorded tapes, plus both proposal use cases |
 | `tests/test_pair_replay.py` | Milestone 1's recorded-tape test for the same-outcome spread |
 | `tests/test_portfolio_manager.py` | Singleton under 32 racing threads, concurrent fills and risk checks, average cost and P&L, inventory across Polymarket's two tokens, every limit, reservations |
-| `tests/test_amm_strategy.py` | The formulas by hand, inventory and sentiment skew direction, clamping and post-only, volatility and confidence, cancel/replace, risk vetoes, expiry, resting fills |
 | `tests/test_persistence_db.py` | Every table and row builder, exact Decimal round trip, batching, non-blocking under a slow or failing database; a PostgreSQL round trip when `TEST_DATABASE_URL` is set |
-| `tests/test_amm_pipeline.py` | The real AMM on the tapes: quote skew on a headline and its decay, every event family persisted, AMM and arbitrage sharing one set of limits |
+| `tests/test_pipeline_persistence.py` | Feature 6 and the PortfolioManager on the tapes: every event family persisted and matching the report, snapshots of all three books, the headline in the sentiment history, per-venue vs cross-venue inventory, marks, no reservation left behind |
 
 Everything in `tests/` is offline: no network, no credentials, no Redis. The one
 PostgreSQL test is skipped unless `TEST_DATABASE_URL` points at a server:
@@ -239,31 +228,31 @@ TEST_DATABASE_URL=postgresql+asyncpg://arb:arb@localhost:5432/arb python -m pyte
 - Modified AI code where it didn't fit: I changed `taker_fee` to `(shares, price, fees)`
   to match the Kalshi fee functions. 
 
-#### Milestone 2 (market making, risk and persistence)
+#### Milestone 2 (risk and persistence)
 
 **Main types of tasks**
 - **Code review:** checking Joshua's Milestone 2 PR against our task split to see
   which of my parts were still open.
-- **Implementation:** `PortfolioManager`, `AMMStrategy` and the `engine/db/`
-  persistence package, wired into `engine/pipeline.py`.
-- **Generating tests and docs:** 71 tests, and `docs/MARKET_MAKING_RISK_PERSISTENCE.md`.
+- **Implementation:** `PortfolioManager` and the `engine/db/` persistence package,
+  wired into `engine/pipeline.py`.
+- **Generating tests and docs:** 45 tests, and `docs/RISK_AND_PERSISTENCE.md`.
 
 **Examples of substantial AI-assisted parts**
 1. **PortfolioManager:** the AI drafted the thread-safe singleton, the position and
    P&L accounting, and the order reservations that stop two strategies or two venues
    from being approved against the same limit.
-2. **AMMStrategy:** the AI drafted the reservation-price and spread formulas and the
-   quote logic (tick-aligned, clamped to 0.01–0.99, cancel-and-replace on a threshold).
-3. **Feature 6:** the AI drafted one schema that runs on PostgreSQL and on SQLite (for
+2. **Feature 6:** the AI drafted one schema that runs on PostgreSQL and on SQLite (for
    tests), with background batch writes so logging never blocks trading.
 
 **How I reviewed, tested and modified the code**
 - **Made the scope decisions myself:** I did feature 6 before feature 3, and kept
   Joshua's sentiment format (`sentiment:{pair_id}`, no confidence field) instead of
-  changing his code, so the AMM derives confidence from the recent headlines.
-- **Tested on our recorded tapes, not only on fixtures:** running the full pipeline
-  caught two bugs the unit tests missed. The AMM was leaning to unwind the arbitrage strategy's hedged position, and
-  the risk check treated the AMM's own resting bid as a hedge. Both are fixed and tested.
+  changing his code, so the stored sentiment confidence is derived from the recent
+  headlines.
+- **Tested beyond fixtures:** feature 6 is checked end to end on our recorded tapes and
+  against a real PostgreSQL server. Testing also caught a risk-check bug: a resting
+  order on one side was counted as a hedge for an order on the other side, letting it
+  skip the per-order limit. It is fixed and has a regression test.
 - **Kept Joshua's work passing:** all 123 of his tests still pass with the new code.
 
 ### Joshua:
